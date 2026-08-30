@@ -5,6 +5,7 @@ GTK3 + AppIndicator, no Qt and no windows: the menu is the whole interface.
 It drives the systemd user service, decides which apps Discord gets to see,
 and keeps its own look in the same config file the daemon reads.
 """
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -220,15 +221,30 @@ def kde_accent():
 
 
 def load_daemon():
-    """Import the daemon module to read its catalog, without running it."""
-    for candidate in (os.environ.get("DGP_DAEMON"),
-                      HOME / ".local/bin/discord-game-presence.py",
-                      pathlib.Path(__file__).resolve().parent / "discord-game-presence.py"):
-        if candidate and pathlib.Path(candidate).exists():
-            spec = importlib.util.spec_from_file_location("dgp", str(candidate))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
+    """Import the daemon module to read its catalog, without running it.
+
+    Packaged installs drop the daemon in /usr/bin with no .py suffix, so the
+    loader is spelled out instead of inferred from the file name.
+    """
+    here = pathlib.Path(__file__).resolve().parent
+    candidates = [os.environ.get("DGP_DAEMON"),
+                  HOME / ".local/bin/discord-game-presence.py",
+                  HOME / ".local/bin/discord-game-presence",
+                  here / "discord-game-presence.py",
+                  here / "discord-game-presence",
+                  pathlib.Path("/usr/bin/discord-game-presence"),
+                  pathlib.Path("/usr/local/bin/discord-game-presence")]
+    for candidate in candidates:
+        if not candidate or not pathlib.Path(candidate).is_file():
+            continue
+        loader = importlib.machinery.SourceFileLoader("dgp", str(candidate))
+        spec = importlib.util.spec_from_loader("dgp", loader)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            loader.exec_module(module)
+        except Exception:
+            continue  # a broken daemon must not take the tray down with it
+        return module
     return None
 
 
@@ -350,6 +366,7 @@ class Tray:
         self.updating = False   # guards programmatic toggles
 
         ICONS.mkdir(parents=True, exist_ok=True)
+        self.current_icon = None
         self.indicator = AppIndicator3.Indicator.new(
             APP, "", AppIndicator3.IndicatorCategory.APPLICATION_STATUS)
         self.indicator.set_icon_theme_path(str(ICONS))
@@ -375,23 +392,32 @@ class Tray:
         color = self.tray_prefs().get("color", COLORS[0][1])
         return kde_accent() if color == ACCENT else color
 
-    def icon_name(self, active):
-        """Render the current shape/color pair and return its icon name."""
+    def icon_ref(self, active):
+        """Render the current shape/color pair and return what to announce.
+
+        The absolute file path, not a bare icon name: the tray host caches its
+        icon-theme lookups, so a freshly written file under the theme path is
+        not picked up and the icon would never change. A path is loaded
+        straight from disk.
+        """
         if self.theme_icon():        # an icon from the desktop theme instead
             return self.theme_icon()
         shape = self.shape()
         color = self.color() if active else IDLE_COLOR
-        name = f"{APP}-{shape}-{color.lstrip('#')}"
-        path = ICONS / f"{name}.svg"
+        path = ICONS / f"{APP}-{shape}-{color.lstrip('#')}.svg"
         if not path.exists():
             body = SHAPE_SVG.get(shape, SHAPE_SVG["blob"]).format(color=color)
             path.write_text(
                 '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
                 f'width="24" height="24">{body}</svg>')
-        return name
+        return str(path)
 
     def apply_icon(self, active):
-        self.indicator.set_icon_full(self.icon_name(active), "Discord Presence")
+        icon = self.icon_ref(active)
+        if icon == getattr(self, "current_icon", None):
+            return
+        self.current_icon = icon
+        self.indicator.set_icon_full(icon, "Discord Presence")
 
     # ---------------------------------------------------------------- menu
     def rebuild_menu(self):

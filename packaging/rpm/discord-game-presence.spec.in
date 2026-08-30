@@ -1,0 +1,56 @@
+Name:           discord-game-presence
+Version:        @VERSION@
+Release:        @RELEASE@%{?dist}
+Summary:        Rich Presence for games and apps Discord ignores on Linux
+
+License:        MIT
+URL:            https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux
+Source0:        %{name}-%{version}.tar.gz
+
+BuildArch:      noarch
+Requires:       python3
+Requires:       python3-gobject
+Requires:       gtk3
+Requires:       iproute
+Recommends:     libappindicator-gtk3
+Recommends:     librsvg2
+
+%description
+Discord only detects games listed with a Windows or macOS executable, so
+native Linux games, anything running under Proton and media apps are never
+picked up. This daemon watches the processes itself and speaks Discord's IPC
+protocol directly, publishing the presence.
+
+A GTK3 tray icon (no Qt, no windows) controls which apps Discord can see, the
+icon look, and autostart.
+
+%prep
+%setup -q -c
+
+%build
+
+%install
+cp -a usr %{buildroot}/
+
+%files
+%{_bindir}/discord-game-presence
+%{_bindir}/discord-presence-tray
+%{_userunitdir}/discord-game-presence.service
+%{_userunitdir}/discord-game-presence-tray.service
+%{_datadir}/applications/discord-presence-tray.desktop
+%{_datadir}/icons/hicolor/scalable/apps/discord-game-presence.svg
+%doc %{_datadir}/doc/discord-game-presence/README.md
+%doc %{_datadir}/doc/discord-game-presence/INSTALAR.txt
+%doc %{_datadir}/doc/discord-game-presence/config.exemplo.json
+
+%post
+cat <<'NOTE'
+
+Discord Presence installed. Enable it for your user (no root):
+    systemctl --user enable --now discord-game-presence.service
+    systemctl --user enable --now discord-game-presence-tray.service
+NOTE
+
+%changelog
+* Sat Aug 29 2026 kxinha <gabriel17166@gmail.com> - @VERSION@-@RELEASE@
+- First packaged release: daemon plus GTK3 tray icon.

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Discord Presence Tray
+GenericName=Rich Presence control
+Comment=Choose which apps Discord can see, and control the presence daemon
+Exec=discord-presence-tray
+Icon=discord-game-presence
+Terminal=false
+Categories=Utility;Settings;
+Keywords=discord;presence;rich presence;tray;games;
+StartupNotify=false

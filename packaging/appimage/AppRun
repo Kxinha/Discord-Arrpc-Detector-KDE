@@ -1,0 +1,26 @@
+#!/bin/sh
+# O AppImage traz o codigo do projeto e usa o Python/GTK do sistema: empacotar
+# GTK inteiro passaria de 100 MB e ainda romperia a integracao com o tema de
+# icones do desktop, que e o que a bandeja usa.
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin:$PATH"
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+case "${1:-tray}" in
+    daemon)  shift; exec "$HERE/usr/bin/discord-game-presence" "$@" ;;
+    tray)    shift 2>/dev/null || true; exec "$HERE/usr/bin/discord-presence-tray" "$@" ;;
+    install)
+        # copia para ~/.local e liga os servicos, para nao depender do AppImage
+        set -e
+        install -Dm755 "$HERE/usr/bin/discord-game-presence" "$HOME/.local/bin/discord-game-presence.py"
+        install -Dm755 "$HERE/usr/bin/discord-presence-tray" "$HOME/.local/bin/discord-presence-tray.py"
+        mkdir -p "$HOME/.config/systemd/user"
+        sed 's|/usr/bin/discord-game-presence|%h/.local/bin/discord-game-presence.py|' \
+            "$HERE/usr/lib/systemd/user/discord-game-presence.service" 2>/dev/null \
+            > "$HOME/.config/systemd/user/discord-game-presence.service" || true
+        systemctl --user daemon-reload
+        echo "Installed to ~/.local/bin. Enable with:"
+        echo "    systemctl --user enable --now discord-game-presence.service"
+        ;;
+    *) exec "$HERE/usr/bin/discord-presence-tray" "$@" ;;
+esac

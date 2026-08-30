@@ -51,6 +51,35 @@ nenhuma linha de código. Veja [O ícone de bandeja](#o-ícone-de-bandeja) e
 
 ## Instalação
 
+### Pacote pronto
+
+Baixe da [página de releases](https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux/releases):
+
+| Distro | Arquivo | Comando |
+|---|---|---|
+| **Fedora**, RHEL, Nobara | `.rpm` | `sudo dnf install ./discord-game-presence-*.noarch.rpm` |
+| **Debian**, Ubuntu, Mint, Pop!_OS | `.deb` | `sudo apt install ./discord-game-presence_*_all.deb` |
+| **Arch**, Manjaro, EndeavourOS, CachyOS | `.pkg.tar.zst` | `sudo pacman -U ./discord-game-presence-*-any.pkg.tar.zst` |
+| Qualquer outra | `.AppImage` | `chmod +x DiscordPresence-*.AppImage && ./DiscordPresence-*.AppImage` |
+
+Depois, uma vez, sem root:
+
+```bash
+systemctl --user enable --now discord-game-presence.service
+systemctl --user enable --now discord-game-presence-tray.service
+```
+
+Arch também pode construir do jeito idiomático com o
+[`PKGBUILD`](packaging/arch/PKGBUILD) do repositório.
+
+O `.AppImage` carrega o código do projeto mas usa o **Python e o GTK do
+sistema** — empacotar GTK inteiro passaria de 100 MB e ainda quebraria a
+integração com o tema de ícones do desktop, que é justamente o que a bandeja
+usa. Ele aceita `./DiscordPresence-*.AppImage daemon` para rodar só o daemon e
+`install` para copiar tudo para `~/.local/bin`.
+
+### Script (instala também o Vesktop)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/arrpc-personalizado-pessoal-linux/main/install.sh | bash
 ```
@@ -300,6 +329,18 @@ discord-presence-tray.py                   o ícone de bandeja (GTK3, sem Qt)
 install.sh                                 instalador multi-distro
 INSTALAR.txt                               instalação manual, passo a passo
 docs/config.exemplo.json                   modelo de configuração
-systemd/discord-game-presence.service
-systemd/discord-game-presence-tray.service
+systemd/*.service                          units para instalação por usuário
+packaging/build.sh                         gera .rpm, .deb, .pkg.tar.zst e .AppImage
+packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /usr
 ```
+
+### Gerar os pacotes
+
+```bash
+packaging/build.sh              # tudo o que a máquina permitir
+packaging/build.sh rpm deb      # só alguns formatos
+```
+
+Sai em `dist/`. Não precisa de root, e a máquina que constrói não precisa ser
+da mesma distro do pacote — `.rpm`, `.deb` e o do pacman são árvores de
+arquivos com metadados. O `.AppImage` baixa o `appimagetool` na primeira vez.
