@@ -8,6 +8,10 @@ processos e **fala o protocolo IPC do Discord direto**.
 Python puro (só biblioteca padrão), roda como serviço systemd de usuário e
 sobe sozinho no boot. Sem Node, sem arRPC oficial, sem plugin do Vencord.
 
+Vem com um **ícone de bandeja** (GTK3 + AppIndicator, nada de Qt e nenhuma
+janela): tudo — quais apps o Discord enxerga, aparência do ícone, início
+automático — se resolve pelo menu.
+
 ---
 
 ## O problema
@@ -39,7 +43,8 @@ daemon publica a presença.
 | **YouTube** (Firefox) | MPRIS + URL da aba | **título e canal**, miniatura do vídeo, progresso, botão do vídeo |
 | **YouTube Music** (Firefox) | MPRIS + URL da aba | **faixa — artista**, capa do álbum, progresso, botões |
 
-Adicionar um app novo é editar um JSON — nenhuma linha de código. Veja
+Adicionar um app novo é escolher no menu da bandeja, ou editar um JSON —
+nenhuma linha de código. Veja [O ícone de bandeja](#o-ícone-de-bandeja) e
 [Adicionar seus próprios apps](#adicionar-seus-próprios-apps).
 
 ---
@@ -71,6 +76,38 @@ O daemon precisa do socket `$XDG_RUNTIME_DIR/discord-ipc-0`. O Discord em
 Flatpak roda em sandbox com `/run` isolado e o socket não fica visível de fora.
 Vesktop nativo (`.deb`/`.rpm`/pacote da distro) cria o socket no runtime dir
 real do usuário — que é o que funciona.
+
+---
+
+## O ícone de bandeja
+
+O menu é a interface inteira — não existe janela. Ele fala com o systemd, com
+o arquivo de configuração e com o próprio catálogo do daemon.
+
+| Menu | O que faz |
+|---|---|
+| **Daemon: running/stopped** | estado do serviço, no topo |
+| **Detected now:** | o que está sendo detectado neste instante |
+| **Apps Discord can see** | liga e desliga cada app do catálogo; marca com `• detected` o que está aberto agora |
+| ↳ **Add a running app** | varre os processos abertos, cruza com a base de jogos detectáveis do Discord e adiciona o que reconhecer — em um clique, com o Application ID certo |
+| ↳ **Remove an app I added** | tira do catálogo o que você adicionou |
+| ↳ **Enable all / Disable all** | tudo de uma vez |
+| **Appearance → Icon shape** | nove desenhos próprios: Blob, Controller, Broadcast, Bolt, Chat, Headset, Rocket, Ghost, Dot |
+| **Appearance → Icon from desktop theme** | usa o ícone do tema do sistema (Breeze, no KDE): Discord, Vesktop, Games, Gamepad… — para o ícone combinar com o resto do painel |
+| **Appearance → Color** | 15 cores com hex (paleta do Discord + Breeze/Plasma + neutras) e **Match KDE accent**, que lê a cor do seu esquema atual |
+| **Daemon → Start at boot** | `systemctl --user enable` do daemon |
+| **Daemon → Start tray at login** | o mesmo para a bandeja |
+| **Daemon → Clear stuck presence** | manda o Discord apagar qualquer presença pendurada |
+| **Daemon → Reload catalog / View log** | recarrega o catálogo; abre o journal em um terminal |
+| **Configuration** | mostra o caminho do JSON, abre o arquivo, abre a pasta, copia o caminho |
+| **Start/Stop/Restart daemon**, **Quit tray** | controle direto |
+
+O ícone fica **acinzentado quando o daemon está parado** e colorido quando
+está rodando, então dá para ver o estado sem abrir o menu. As preferências
+ficam em `"tray"` dentro do mesmo `~/.config/discord-game-presence.json`.
+
+Ele roda pelo serviço `discord-game-presence-tray.service`, ligado à sessão
+gráfica. Para instalar sem a bandeja: `SKIP_TRAY=1 ./install.sh`.
 
 ---
 
@@ -226,10 +263,13 @@ artista + título no caso do YouTube Music.
 ## Operação
 
 ```bash
-systemctl --user status  discord-game-presence     # estado
-systemctl --user restart discord-game-presence     # após editar a config
-journalctl --user -u discord-game-presence -f      # log ao vivo
+systemctl --user status  discord-game-presence          # estado
+systemctl --user restart discord-game-presence          # após editar a config
+journalctl --user -u discord-game-presence -f           # log ao vivo
+systemctl --user restart discord-game-presence-tray     # a bandeja
 ```
+
+Pela bandeja, os mesmos comandos estão em **Daemon** e no rodapé do menu.
 
 Uma thread por app, cada uma esperando o processo aparecer. Se o Discord
 estiver fechado ou o socket cair, a thread tenta de novo no ciclo seguinte
@@ -255,9 +295,11 @@ systemctl --user daemon-reload
 ## Arquivos
 
 ```
-discord-game-presence.py              o daemon
-install.sh                            instalador multi-distro
-INSTALAR.txt                          instalação manual, passo a passo
-docs/config.exemplo.json              modelo de configuração
+discord-game-presence.py                   o daemon
+discord-presence-tray.py                   o ícone de bandeja (GTK3, sem Qt)
+install.sh                                 instalador multi-distro
+INSTALAR.txt                               instalação manual, passo a passo
+docs/config.exemplo.json                   modelo de configuração
 systemd/discord-game-presence.service
+systemd/discord-game-presence-tray.service
 ```

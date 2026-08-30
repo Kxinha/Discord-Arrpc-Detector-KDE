@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Instalador do discord-game-presence: Vesktop nativo + daemon de Rich Presence.
+# Instalador do discord-game-presence: Vesktop nativo, daemon de Rich Presence
+# e o icone de bandeja que controla tudo.
 #
 #   curl -fsSL <URL_RAW>/install.sh | bash
 #
@@ -13,6 +14,7 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"
 SKIP_VESKTOP="${SKIP_VESKTOP:-0}"
+SKIP_TRAY="${SKIP_TRAY:-0}"
 
 msg() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -55,14 +57,22 @@ pkg_install() {
 }
 
 # ---------------------------------------------------------------- dependencias
+# O tray e GTK3 + AppIndicator (nada de Qt), entao precisa do PyGObject, do
+# binding do indicador e do librsvg para desenhar os icones em SVG.
 install_deps() {
     local distro="$1"
     case "$distro" in
-        arch)   pkg_install arch python iproute2 systemd curl ;;
-        debian) pkg_install debian python3 iproute2 curl ;;
-        fedora) pkg_install fedora python3 iproute curl ;;
-        suse)   pkg_install suse python3 iproute2 curl ;;
-        *)      warn "instale manualmente: python3, iproute2 (ss), curl" ;;
+        arch)   pkg_install arch python iproute2 systemd curl \
+                    python-gobject gtk3 libayatana-appindicator librsvg ;;
+        debian) pkg_install debian python3 iproute2 curl \
+                    python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
+                    librsvg2-common ;;
+        fedora) pkg_install fedora python3 iproute curl \
+                    python3-gobject gtk3 libappindicator-gtk3 librsvg2 ;;
+        suse)   pkg_install suse python3 iproute2 curl \
+                    python3-gobject gtk3 libayatana-appindicator3-1 \
+                    typelib-1_0-AyatanaAppIndicator3-0_1 ;;
+        *)      warn "instale manualmente: python3, iproute2 (ss), curl, PyGObject, GTK3, AppIndicator, librsvg" ;;
     esac
     command -v busctl >/dev/null || warn "busctl ausente: Stremio e YouTube Music nao funcionarao"
 }
@@ -117,24 +127,35 @@ install_vesktop() {
     sudo ln -sf /opt/Vesktop/vesktop /usr/local/bin/vesktop
 }
 
-# --------------------------------------------------------------------- daemon
+# ------------------------------------------------------------ daemon + tray
 install_daemon() {
     mkdir -p "$BIN_DIR" "$UNIT_DIR"
-    if [ -f "$(dirname "$0")/discord-game-presence.py" ]; then
-        install -m 755 "$(dirname "$0")/discord-game-presence.py" "$BIN_DIR/discord-game-presence.py"
-        install -m 644 "$(dirname "$0")/systemd/discord-game-presence.service" \
-            "$UNIT_DIR/discord-game-presence.service"
+    local here; here="$(dirname "$0")"
+
+    if [ -f "$here/discord-game-presence.py" ]; then
+        install -m 755 "$here/discord-game-presence.py" "$BIN_DIR/discord-game-presence.py"
+        install -m 755 "$here/discord-presence-tray.py" "$BIN_DIR/discord-presence-tray.py"
+        install -m 644 "$here/systemd/discord-game-presence.service" "$UNIT_DIR/"
+        install -m 644 "$here/systemd/discord-game-presence-tray.service" "$UNIT_DIR/"
     else  # instalacao via curl | bash: baixa do repositorio
         fetch "$REPO_RAW/discord-game-presence.py" "$BIN_DIR/discord-game-presence.py" \
-            || die "falhou baixar o daemon (repo privado: exporte GITHUB_TOKEN)"
-        chmod 755 "$BIN_DIR/discord-game-presence.py"
-        fetch "$REPO_RAW/systemd/discord-game-presence.service" \
-            "$UNIT_DIR/discord-game-presence.service" \
-            || die "falhou baixar o service (repo privado: exporte GITHUB_TOKEN)"
+            || die "falhou baixar o daemon"
+        fetch "$REPO_RAW/discord-presence-tray.py" "$BIN_DIR/discord-presence-tray.py" \
+            || die "falhou baixar o tray"
+        chmod 755 "$BIN_DIR/discord-game-presence.py" "$BIN_DIR/discord-presence-tray.py"
+        for unit in discord-game-presence.service discord-game-presence-tray.service; do
+            fetch "$REPO_RAW/systemd/$unit" "$UNIT_DIR/$unit" || die "falhou baixar $unit"
+        done
     fi
 
     systemctl --user daemon-reload
     systemctl --user enable --now discord-game-presence.service
+    if [ "$SKIP_TRAY" = 1 ]; then
+        msg "tray nao habilitado (SKIP_TRAY=1)"
+    else
+        systemctl --user enable --now discord-game-presence-tray.service \
+            || warn "o tray nao subiu agora; ele inicia junto com a sessao grafica"
+    fi
 }
 
 # ------------------------------------------------------------------- L4D2 map
@@ -163,6 +184,7 @@ main() {
     setup_l4d2
 
     msg "pronto. servico: systemctl --user status discord-game-presence"
+    msg "o icone na bandeja controla tudo: apps, aparencia e inicio automatico"
     cat <<'EOF'
 
 Proximos passos:

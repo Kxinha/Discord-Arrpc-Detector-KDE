@@ -14,12 +14,16 @@ Requisitos: systemd (servico de usuario), python3, ss (iproute2),
 busctl (systemd, para apps de midia) e um cliente Discord que exponha
 o socket de IPC - Vesktop nativo.
 
+Para o icone de bandeja, tambem: PyGObject, GTK3, AppIndicator e
+librsvg. Nada de Qt.
+
 INDICE
 ------
   PARTE 1 - INSTALACAO
     1. dependencias
     2. vesktop nativo
     3. o daemon
+    3b. o icone de bandeja
   PARTE 2 - CUSTOMIZACAO (adicionar seus apps)
     4. como o daemon decide o que mostrar
     5. adicionar um JOGO que existe na base do Discord
@@ -109,6 +113,64 @@ Deve dizer "active (running)". O servico ja fica habilitado para subir
 sozinho no proximo boot.
 
 
+--------------------------------------------------------------------
+PASSO 3b - O ICONE DE BANDEJA (opcional, mas e a interface)
+--------------------------------------------------------------------
+Dependencias, por distro:
+
+Arch:
+    sudo pacman -S --needed python-gobject gtk3 libayatana-appindicator librsvg
+
+Debian / Ubuntu:
+    sudo apt install python3-gi gir1.2-gtk-3.0 \
+        gir1.2-ayatanaappindicator3-0.1 librsvg2-common
+
+Fedora:
+    sudo dnf install python3-gobject gtk3 libappindicator-gtk3 librsvg2
+
+openSUSE:
+    sudo zypper install python3-gobject gtk3 libayatana-appindicator3-1 \
+        typelib-1_0-AyatanaAppIndicator3-0_1
+
+Instalar:
+    cp discord-presence-tray.py ~/.local/bin/
+    chmod +x ~/.local/bin/discord-presence-tray.py
+    cp systemd/discord-game-presence-tray.service ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable --now discord-game-presence-tray.service
+
+O que o menu oferece (tudo em ingles):
+
+  Daemon: running/stopped .... estado do servico
+  Detected now: ............... o que esta sendo detectado agora
+  Apps Discord can see ........ liga/desliga cada app do catalogo
+     Add a running app ........ varre os processos abertos, cruza com a
+                                base de jogos do Discord e adiciona o que
+                                reconhecer, com o Application ID certo
+     Remove an app I added .... remove o que voce adicionou
+     Enable all / Disable all . tudo de uma vez
+  Appearance
+     Icon shape ............... Blob, Controller, Broadcast, Bolt, Chat,
+                                Headset, Rocket, Ghost, Dot
+     Icon from desktop theme .. usa o icone do tema (Breeze/KDE)
+     Color .................... 15 cores com hex + Match KDE accent
+  Daemon
+     Start at boot ............ habilita o servico do daemon
+     Start tray at login ...... habilita o servico da bandeja
+     Clear stuck presence ..... apaga presenca pendurada no Discord
+     Reload catalog / View log
+  Configuration .............. caminho do JSON, abrir arquivo/pasta, copiar
+  Start / Restart / Quit
+
+O icone fica cinza quando o daemon esta parado e colorido quando roda.
+As preferencias da bandeja ficam no mesmo JSON, na chave "tray".
+
+Se a bandeja nao aparecer:
+  - confira o servico:  systemctl --user status discord-game-presence-tray
+  - o KDE precisa do widget "System Tray" no painel;
+  - em GNOME, instale a extensao AppIndicator Support.
+
+
 ####################################################################
  PARTE 2 - CUSTOMIZACAO: COLOCANDO OS SEUS APPS
 ####################################################################
@@ -116,6 +178,10 @@ sozinho no proximo boot.
 --------------------------------------------------------------------
 PASSO 4 - COMO O DAEMON DECIDE O QUE MOSTRAR
 --------------------------------------------------------------------
+ATALHO: tudo o que esta descrito nesta parte tambem da para fazer pelo
+menu da bandeja, sem editar arquivo nenhum. O que vem abaixo e o
+caminho na mao, para quando a bandeja nao estiver instalada.
+
 Existem duas camadas:
 
   a) uma tabela padrao dentro do proprio discord-game-presence.py
@@ -422,7 +488,11 @@ Presenca "presa", de algo que ja fechei:
 PASSO 13 - DESINSTALAR
 --------------------------------------------------------------------
     systemctl --user disable --now discord-game-presence
+    systemctl --user disable --now discord-game-presence-tray
     rm ~/.local/bin/discord-game-presence.py
+    rm ~/.local/bin/discord-presence-tray.py
     rm ~/.config/systemd/user/discord-game-presence.service
+    rm ~/.config/systemd/user/discord-game-presence-tray.service
     rm -f ~/.config/discord-game-presence.json
+    rm -rf ~/.cache/discord-game-presence
     systemctl --user daemon-reload

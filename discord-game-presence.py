@@ -122,6 +122,13 @@ def track_length(key, meta, video=None):
     return length
 
 
+def fetch_json(url):
+    """GET simples que devolve JSON."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=8) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
 def youtube_length(video):
     """Duracao de um video do YouTube, lida da pagina (em microssegundos)."""
     try:
@@ -355,6 +362,95 @@ def stremio_state():
     return label, None
 
 
+SOBER_LOG = (pathlib.Path.home() /
+             ".var/app/org.vinegarhq.Sober/data/sober/sober_logs/latest.log")
+
+_ROBLOX_CACHE = {}
+
+
+def roblox_place():
+    """placeId da experiencia aberta agora, lido do log do Sober."""
+    try:
+        with SOBER_LOG.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 200_000))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    # onGameLoaded marca a entrada; onGameLeaveBegin, a saida do mesmo place
+    events = re.findall(r"onGame(Loaded|LeaveBegin)\(\).*?placeId:(\d+)", tail)
+    if not events:
+        return None
+    kind, place = events[-1]
+    return place if kind == "Loaded" else None
+
+
+def roblox_game(place):
+    """Nome, criador, jogadores e icone da experiencia (API publica da Roblox)."""
+    if place in _ROBLOX_CACHE:
+        info = dict(_ROBLOX_CACHE[place])
+    else:
+        try:
+            universe = fetch_json(
+                f"https://apis.roblox.com/universes/v1/places/{place}/universe")
+            universe = universe["universeId"]
+            data = fetch_json(
+                f"https://games.roblox.com/v1/games?universeIds={universe}")["data"][0]
+            icon = fetch_json(
+                "https://thumbnails.roblox.com/v1/games/icons"
+                f"?universeIds={universe}&size=512x512&format=Png&isCircular=false")
+            info = {"universe": universe,
+                    "name": data["name"],
+                    "creator": data["creator"]["name"],
+                    "icon": (icon["data"][0].get("imageUrl") or None)}
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            return None
+        _ROBLOX_CACHE[place] = info
+        info = dict(info)
+    return info
+
+
+def roblox_players(universe):
+    """Quantos estao na experiencia agora (nao cabe cache: muda o tempo todo)."""
+    try:
+        data = fetch_json(
+            f"https://games.roblox.com/v1/games?universeIds={universe}")["data"][0]
+        return data.get("playing")
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def roblox_state():
+    """Experiencia aberta no Roblox, com criador, icone e gente online."""
+    place = roblox_place()
+    if not place:
+        return "No menu", None
+
+    info = roblox_game(place)
+    if not info:
+        return "Em uma experiencia", None
+
+    extra = {"large_text": info["name"][:128]}
+    if info.get("icon"):
+        extra["large_image"] = info["icon"]
+    extra["buttons"] = [{"label": "Ver no Roblox",
+                         "url": f"https://www.roblox.com/games/{place}"}]
+
+    # o numero da Roblox e quanta gente esta na experiencia inteira, nao no
+    # servidor: como nao existe um "maximo", vai no texto e nao como party
+    players = roblox_players(info["universe"])
+    text = f"por {info['creator']}"
+    if players:
+        text = f"{text} · {players:,} jogando".replace(",", ".")
+    return text, extra
+
+
+def roblox_title():
+    place = roblox_place()
+    info = roblox_game(place) if place else None
+    return info["name"][:128] if info else "Roblox"
+
+
 def steam_libraries():
     """Todas as bibliotecas Steam, inclusive em outros discos."""
     roots = [pathlib.Path.home() / ".local/share/Steam",
@@ -549,6 +645,15 @@ GAMES = {
         "type": 3,  # Assistindo
         "timer_per_title": True,
     },
+    # Roblox roda pelo Sober (flatpak): os processos aparecem com o argumento
+    # roblox-player:..., e a experiencia atual sai do log do Sober
+    "roblox-player:": {
+        "client_id": "363445589247131668",
+        "details": roblox_title,
+        "state": roblox_state,
+        "large_text": "Roblox",
+        "timer_per_title": True,
+    },
     "gta-sa.exe": {
         "client_id": "363447565905166336",
         "details": "Grand Theft Auto: San Andreas",
@@ -585,7 +690,10 @@ def load_config():
     Formato: {"games": {"<processo>": {"client_id": "...", "details": "...",
     "state": "...", "large_text": "...", "large_image": "..."}}}. Entradas
     novas sao adicionadas; as existentes tem so os campos citados trocados.
-    Um client_id vazio desliga a entrada.
+    Um client_id vazio, ou "enabled": false, desliga a entrada.
+
+    Outras chaves de primeiro nivel sao ignoradas de proposito: o icone da
+    bandeja guarda as preferencias dele no mesmo arquivo, em "tray".
     """
     try:
         data = json.loads(CONFIG.read_text())
@@ -758,7 +866,8 @@ def watch(proc, game):
 
 def main():
     load_config()
-    active = [(proc, game) for proc, game in GAMES.items() if game.get("client_id")]
+    active = [(proc, game) for proc, game in GAMES.items()
+              if game.get("client_id") and game.get("enabled", True)]
     ids = list(dict.fromkeys(game["client_id"] for _, game in active))
 
     for client_id in ids:  # restos de uma execucao anterior
