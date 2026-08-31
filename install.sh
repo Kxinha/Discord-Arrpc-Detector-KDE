@@ -8,8 +8,8 @@
 # com systemd (Vesktop vai para /opt a partir do tarball oficial).
 set -euo pipefail
 
-REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/gabrielmf1998/arrpc-personalizado-pessoal-linux/main}"
-# o repositorio e privado: raw.githubusercontent exige token nesse caso
+REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/main}"
+# token so e preciso se o repositorio voltar a ser privado
 GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"

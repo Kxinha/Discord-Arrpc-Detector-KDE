@@ -4,7 +4,7 @@ pkgver=1.0.0
 pkgrel=1
 pkgdesc="Rich Presence for games and apps Discord ignores on Linux"
 arch=('any')
-url="https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux"
+url="https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE"
 license=('MIT')
 depends=('python' 'python-gobject' 'gtk3' 'iproute2')
 optdepends=('libayatana-appindicator: tray icon'
@@ -14,7 +14,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 package() {
-    cd "$srcdir/arrpc-personalizado-pessoal-linux-$pkgver"
+    cd "$srcdir/Discord-Arrpc-Detector-KDE-$pkgver"
     install -Dm755 discord-game-presence.py "$pkgdir/usr/bin/$pkgname"
     install -Dm755 discord-presence-tray.py "$pkgdir/usr/bin/discord-presence-tray"
     install -Dm644 packaging/files/$pkgname.service \

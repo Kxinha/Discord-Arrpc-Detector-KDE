@@ -30,7 +30,7 @@ from gi.repository import GLib, Gtk  # noqa: E402
 
 APP = "discord-game-presence"
 SERVICE = f"{APP}.service"
-PROJECT_URL = "https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux"
+PROJECT_URL = "https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE"
 DETECTABLE_URL = "https://discord.com/api/v9/applications/detectable"
 
 HOME = pathlib.Path.home()

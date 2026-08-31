@@ -53,7 +53,7 @@ nenhuma linha de código. Veja [O ícone de bandeja](#o-ícone-de-bandeja) e
 
 ### Pacote pronto
 
-Baixe da [página de releases](https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux/releases):
+Baixe da [página de releases](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases):
 
 | Distro | Arquivo | Comando |
 |---|---|---|
@@ -81,7 +81,7 @@ usa. Ele aceita `./DiscordPresence-*.AppImage daemon` para rodar só o daemon e
 ### Script (instala também o Vesktop)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/arrpc-personalizado-pessoal-linux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/main/install.sh | bash
 ```
 
 O instalador:

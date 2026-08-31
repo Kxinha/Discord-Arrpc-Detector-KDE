@@ -4,7 +4,7 @@ Release:        @RELEASE@%{?dist}
 Summary:        Rich Presence for games and apps Discord ignores on Linux
 
 License:        MIT
-URL:            https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux
+URL:            https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch

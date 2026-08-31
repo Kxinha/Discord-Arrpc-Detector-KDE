@@ -12,7 +12,7 @@ VERSION="${VERSION:-1.0.0}"
 RELEASE="${RELEASE:-1}"
 PKGNAME="discord-game-presence"
 MAINTAINER="kxinha <gabriel17166@gmail.com>"
-URL="https://github.com/gabrielmf1998/arrpc-personalizado-pessoal-linux"
+URL="https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE"
 SUMMARY="Rich Presence for games and apps Discord ignores on Linux"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
