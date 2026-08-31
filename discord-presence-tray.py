@@ -311,14 +311,30 @@ SYSTEM_PREFIXES = ("/usr/bin/", "/usr/lib/", "/usr/libexec/", "/usr/sbin/",
                    "/bin/", "/sbin/", "/opt/google/")
 
 
+SHELL_NAMES = {"bash", "sh", "zsh", "dash", "fish", "ksh", "csh", "tcsh"}
+
+
 def running_processes():
-    """(argv0, full command line) of this user's processes."""
-    result = run("ps", "-u", str(os.getuid()), "-o", "args=")
+    """(argv0, full command line), skipping shell one-liners.
+
+    A command typed in a terminal carries the very name being searched for, so
+    counting it would suggest a game that is not running at all.
+    """
     rows = []
-    for line in result.stdout.splitlines():
-        args = line.strip()
-        if args and not args.startswith("["):
-            rows.append((args.split(" ", 1)[0], args))
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            raw = pathlib.Path(f"/proc/{entry}/cmdline").read_bytes()
+        except OSError:
+            continue  # the process died mid-read
+        argv = raw.decode("utf-8", "replace").split("\0")
+        if not argv or not argv[0]:
+            continue  # kernel thread
+        if (os.path.basename(argv[0]) in SHELL_NAMES
+                and any(a.startswith("-") and "c" in a for a in argv[1:2])):
+            continue
+        rows.append((argv[0], " ".join(argv).strip()))
     return rows
 
 
@@ -692,7 +708,8 @@ class Tray:
         games.setdefault(proc, {})["enabled"] = item.get_active()
         write_config(self.config)
         systemctl("restart", SERVICE)
-        notify(f"{item.get_label()} {'enabled' if item.get_active() else 'disabled'}.")
+        name = self.app_items.get(proc, (None, proc))[1]
+        notify(f"{name} {'enabled' if item.get_active() else 'disabled'}.")
         self.refresh()
 
     def on_set_all(self, _item, value):
@@ -860,10 +877,13 @@ class Tray:
         self.detected = found
         names = sorted(label for proc, (item, label) in self.app_items.items()
                        if proc in found)
-        self.showing_item.set_label(
-            "Detected now: " + (", ".join(names) if names else "nothing"))
-        self.indicator.set_title(
-            "Discord Presence — " + (", ".join(names) if names else "idle"))
+        listed = ", ".join(names) if names else "nothing"
+        if service_active():
+            self.showing_item.set_label(f"Showing now: {listed}")
+            self.indicator.set_title(f"Discord Presence — {listed}")
+        else:  # open apps are not being published while the daemon is stopped
+            self.showing_item.set_label(f"Open, but not published: {listed}")
+            self.indicator.set_title("Discord Presence — stopped")
         return False
 
 

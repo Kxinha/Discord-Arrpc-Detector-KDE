@@ -169,9 +169,13 @@ uma imagem em **General Information → App Icon** e copie o **Application ID**.
 ps aux | grep -i <nome do app>
 ```
 
-O casamento é feito com `pgrep -f`, ou seja, qualquer trecho estável da linha
-de comando serve. É isso que permite pegar jogos sob Proton, cujo processo
-aparece como `S:\common\Jogo\jogo.exe` — basta usar `jogo.exe`.
+O casamento é por trecho da linha de comando, então qualquer parte estável
+serve. É isso que permite pegar jogos sob Proton, cujo processo aparece como
+`S:\common\Jogo\jogo.exe` — basta usar `jogo.exe`.
+
+Comandos de shell (`bash -c …`) ficam de fora da busca de propósito: um
+comando digitado no terminal carrega o próprio nome procurado e virava falso
+positivo. Scripts de jogo (o `hl2.sh` do L4D2, por exemplo) continuam valendo.
 
 ### 3. Escreva a entrada
 
@@ -210,7 +214,7 @@ usar os seus (com o seu ícone), basta sobrescrever o id:
   "games": {
     "youtube":                 { "client_id": "SEU_ID" },
     "youtube-music":           { "client_id": "SEU_ID" },
-    "libexec/stremio/stremio": { "client_id": "SEU_ID" }
+    "stremio":                 { "client_id": "SEU_ID" }
   }
 }
 ```
@@ -282,6 +286,9 @@ artista + título no caso do YouTube Music.
 - **Botões não aparecem para você mesmo**, só para quem vê seu perfil.
 - **Stremio não publica posição**, então não há progresso real do episódio — o
   cronômetro reinicia a cada título novo.
+- Mídia **pausada por mais de 5 minutos** sai do perfil: uma aba de vídeo
+  pausada continua sendo um player enquanto existir, e a presença ficava
+  pendurada dizendo "(pausado)" por horas. Volta sozinha ao dar play.
 - Página de canal, Shorts e embeds do YouTube não trazem id na URL: sem
   miniatura e sem duração nesses casos.
 - O link do artista no YouTube Music leva à **busca**, porque o MPRIS não traz

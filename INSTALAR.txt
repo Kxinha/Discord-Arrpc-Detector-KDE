@@ -336,7 +336,7 @@ autor. Se voce quiser o SEU app (com o seu icone), sobrescreva so o id:
   "games": {
     "youtube":                 { "client_id": "SEU_ID" },
     "youtube-music":           { "client_id": "SEU_ID" },
-    "libexec/stremio/stremio": { "client_id": "SEU_ID" }
+    "stremio":                 { "client_id": "SEU_ID" }
   }
 }
 
@@ -500,6 +500,10 @@ Aparece como "Jogando" mesmo sendo musica ou serie:
 Botoes de link nao aparecem:
     - botoes nunca aparecem para voce mesmo, apenas para quem ve o seu
       perfil. Peca para alguem conferir.
+
+Presenca de video/musica nao sai depois que parei de assistir:
+    - uma aba pausada continua sendo um player enquanto existir. Depois de
+      5 minutos parada a presenca sai sozinha; dando play, volta.
 
 Musica/video sem barra de tempo:
     - o Firefox as vezes nao publica a posicao nem a duracao. Quando a

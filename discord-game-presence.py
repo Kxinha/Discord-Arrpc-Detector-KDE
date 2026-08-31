@@ -23,6 +23,11 @@ import time
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
 
+def log(message):
+    """Uma linha no journal: journalctl --user -u discord-game-presence."""
+    print(message, flush=True)
+
+
 def mc_pid():
     r = subprocess.run(["pgrep", "-f", "PrismLauncher/instances"], capture_output=True, text=True)
     pids = r.stdout.split()
@@ -100,6 +105,22 @@ def mpris_meta(player):
 _POSITION_ANCHOR = {}
 _LAST_TRACK = {}
 _LENGTH_CACHE = {}
+_PAUSED_SINCE = {}
+
+# Uma aba de video pausada continua sendo um player MPRIS enquanto existir, e
+# a presenca ficava pendurada por horas dizendo "(pausado)". Depois desse
+# tempo parado, ninguem esta assistindo: a presenca sai do perfil e volta
+# assim que der play.
+PAUSE_GRACE = 300
+
+
+def media_idle(player):
+    """True quando o player existe mas esta parado ha tempo demais."""
+    if mpris("PlaybackStatus", player) == "Playing":
+        _PAUSED_SINCE.pop(player, None)
+        return False
+    started = _PAUSED_SINCE.setdefault(player, time.monotonic())
+    return time.monotonic() - started > PAUSE_GRACE
 
 
 def track_length(key, meta, video=None):
@@ -208,11 +229,13 @@ def ytm_player():
 
 
 def ytm_running():
-    return ytm_player() is not None
+    player = ytm_player()
+    return bool(player) and not media_idle(player)
 
 
 def yt_running():
-    return firefox_player(is_youtube) is not None
+    player = firefox_player(is_youtube)
+    return bool(player) and not media_idle(player)
 
 
 def yt_title():
@@ -634,7 +657,10 @@ GAMES = {
     },
     # O Stremio nao esta na base detectavel do Discord: o client_id vem de um app
     # criado em discord.com/developers/applications. Sem ele, a entrada fica inativa.
-    "libexec/stremio/stremio": {
+    "stremio": {
+        "running": lambda: (any("libexec/stremio/stremio" in line
+                                for line in process_cmdlines())
+                            and not media_idle("org.mpris.MediaPlayer2.Stremio")),
         "client_id": "1536170931540463647",
         "details": "Stremio",
         "state": stremio_state,
@@ -679,6 +705,14 @@ GAMES = {
 POLL = 15
 IPC_TIMEOUT = 15
 
+# Avisa as sessoes que e hora de sair. Sem isso o processo morria com as
+# conexoes abertas e o cliente continuava exibindo a ultima atividade: quem
+# publicou tem de ser quem apaga, na mesma conexao.
+STOPPING = threading.Event()
+
+# entradas renomeadas: o config antigo do usuario continua valendo
+LEGACY_KEYS = {"libexec/stremio/stremio": "stremio"}
+
 CONFIG = pathlib.Path(
     os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")
 ) / "discord-game-presence.json"
@@ -699,7 +733,13 @@ def load_config():
         data = json.loads(CONFIG.read_text())
     except (OSError, ValueError):
         return
-    for proc, fields in (data.get("games") or {}).items():
+
+    games = data.get("games") or {}
+    for old, new in LEGACY_KEYS.items():  # configs escritos antes da renomeacao
+        if old in games:
+            games.setdefault(new, {}).update(games.pop(old))
+
+    for proc, fields in games.items():
         if proc in GAMES:
             GAMES[proc].update(fields)
         elif fields.get("client_id"):
@@ -729,12 +769,48 @@ def send(sock, op, payload):
     return json.loads(body)
 
 
+SHELL_NAMES = {"bash", "sh", "zsh", "dash", "fish", "ksh", "csh", "tcsh"}
+_PROC_CACHE = {"stamp": 0.0, "rows": []}
+
+
+def process_cmdlines():
+    """Linhas de comando dos processos, com um cache de dois segundos.
+
+    Uma invocacao de shell (`bash -c ...`) fica de fora: o padrao procurado
+    aparece na linha de comando de quem esta procurando, e a busca acabava
+    encontrando a si mesma - um falso positivo que so some quando o terminal
+    fecha.
+    """
+    now = time.monotonic()
+    if now - _PROC_CACHE["stamp"] < 2:
+        return _PROC_CACHE["rows"]
+
+    rows, mine = [], os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == mine:
+            continue
+        try:
+            raw = pathlib.Path(f"/proc/{entry}/cmdline").read_bytes()
+        except OSError:
+            continue  # o processo morreu no meio da leitura
+        argv = raw.decode("utf-8", "replace").split("\0")
+        if not argv or not argv[0]:
+            continue  # thread do kernel
+        if (os.path.basename(argv[0]) in SHELL_NAMES
+                and any(a.startswith("-") and "c" in a for a in argv[1:2])):
+            continue
+        rows.append(" ".join(argv).strip())
+
+    _PROC_CACHE.update(stamp=now, rows=rows)
+    return rows
+
+
 def running(proc):
-    # a chave e o nome do processo, ou uma funcao quando o processo nao basta
+    # a chave e um trecho da linha de comando, ou uma funcao quando o processo
+    # sozinho nao basta (uma aba de navegador, por exemplo)
     if callable(proc):
         return proc()
-    # -f porque processos sob Proton aparecem com caminho windows completo
-    return subprocess.run(["pgrep", "-f", proc], capture_output=True).returncode == 0
+    return any(proc in line for line in process_cmdlines())
 
 
 def changed(old, new):
@@ -818,6 +894,7 @@ def session(proc, game):
             "args": {"pid": os.getpid(), "activity": activity},
             "nonce": str(time.time()),
         })
+        log(f"publicou {game['large_text']}: {text}")
 
     def current_state():
         s = game["state"]
@@ -831,8 +908,9 @@ def session(proc, game):
             return
         publish(state)
 
-        while running(proc):
-            time.sleep(POLL)
+        while running(proc) and not STOPPING.is_set():
+            if STOPPING.wait(POLL):
+                break
             if not running(proc):
                 break  # nao publica nada depois que o app fechou
             new = current_state()
@@ -847,44 +925,59 @@ def session(proc, game):
             send(sock, 1, {"cmd": "SET_ACTIVITY",
                            "args": {"pid": os.getpid(), "activity": None},
                            "nonce": str(time.time())})
-        except (OSError, ValueError):
-            pass  # IPC ja caiu; o clear do proximo start resolve
+            log(f"apagou {game['large_text']}")
+        except (OSError, ValueError) as error:
+            log(f"nao consegui apagar {game['large_text']}: {error}")
         sock.close()
 
 
 def watch(proc, game):
     """Espera o jogo abrir, publica a presenca, repete."""
     alive = game.get("running", proc)
-    while True:
+    while not STOPPING.is_set():
         if running(alive):
             try:
                 session(alive, game)
-            except (OSError, ConnectionError, ValueError):
-                pass  # Discord fechado ou IPC caiu; tenta de novo depois
-        time.sleep(POLL)
+            except (OSError, ConnectionError, ValueError) as error:
+                log(f"{proc}: sessao caiu ({error})")
+        if STOPPING.wait(POLL):
+            return
 
 
 def main():
     load_config()
     active = [(proc, game) for proc, game in GAMES.items()
               if game.get("client_id") and game.get("enabled", True)]
-    ids = list(dict.fromkeys(game["client_id"] for _, game in active))
 
+    # todo o catalogo, nao so o que esta ligado: desligar um app tambem tem de
+    # apagar a presenca que ele deixou
+    ids = list(dict.fromkeys(game["client_id"] for game in GAMES.values()
+                             if game.get("client_id")))
     for client_id in ids:  # restos de uma execucao anterior
         clear_presence(client_id)
 
+    threads = [threading.Thread(target=watch, args=(proc, game), daemon=True)
+               for proc, game in active]
+
     def shutdown(*_):
-        for client_id in ids:
+        STOPPING.set()  # cada sessao apaga a sua presenca e fecha a conexao
+        deadline = time.monotonic() + 6
+        for thread in threads:
+            thread.join(timeout=max(0.1, deadline - time.monotonic()))
+        for client_id in ids:  # rede de seguranca, para o que nao fechou
             clear_presence(client_id)
+        log("encerrado")
         os._exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    for proc, game in active:
-        threading.Thread(target=watch, args=(proc, game), daemon=True).start()
-    while True:
-        time.sleep(3600)
+    log(f"vigiando {len(threads)} app(s): "
+        + ", ".join(sorted(game["large_text"] for _, game in active)))
+    for thread in threads:
+        thread.start()
+    while not STOPPING.wait(3600):
+        pass
 
 
 if __name__ == "__main__":
