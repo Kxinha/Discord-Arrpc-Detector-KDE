@@ -260,24 +260,23 @@ Firefox muda a cada boot e cada aba com mídia vira um player, então a escolha 
 confundem, e é por isso que essas entradas usam uma função em `running` no
 lugar de um nome de processo.
 
-O Firefox **não implementa a posição de reprodução**: `Position` devolve 0
-fixo e `mpris:length` raramente aparece. Sem posição não existe barra de
-progresso honesta — tentei estimar (ancorando na troca de faixa e projetando o
-tempo) e o resultado mentia depois de qualquer seek, que é justamente quando o
-tempo importa.
+O Firefox informa a posição **em rajadas**: publica por um tempo depois de um
+seek ou de uma troca de vídeo — quando a página chama `setPositionState` — e
+depois volta a `0`. Nunca publica `mpris:length`.
 
-Então o tempo tem dois modos:
+Por isso o tempo funciona assim:
 
-- **Player que informa posição** (Chromium, mpv, players nativos): barra
-  completa, `1:23 / 25:36`.
-- **Player que não informa** (Firefox): um cronômetro do tempo desde que aquele
-  título apareceu — "assistindo há X". Não afirma onde você está no vídeo,
-  porque isso não dá para saber.
+- **Leitura real disponível**: barra de progresso verdadeira, `1:23 / 13:43`.
+- **Entre as rajadas**: o daemon segue a partir da última leitura real, por até
+  10 minutos. Um seek faz o Firefox reportar de novo, o que corrige a conta
+  sozinho.
+- **Sem nenhuma leitura real**: nenhum número. A duração do vídeo vai para o
+  texto (`TGG · 13:43`), porque um cronômetro correndo ao lado do título parece
+  a posição do vídeo e estaria sempre errado.
 
-Antes de cair no cronômetro, o daemon procura o mesmo título em qualquer outro
-player MPRIS. É por isso que instalar a extensão **Plasma Browser Integration**
-no Firefox (ou assistir pelo Chromium) faz a barra correta aparecer sozinha:
-esses publicam um player com posição de verdade.
+Instalar a extensão **Plasma Browser Integration** no Firefox (ou assistir pelo
+Chromium) dá a barra sempre certa: esses publicam um player MPRIS com posição
+de verdade, e o daemon procura o mesmo título neles antes de desistir.
 
 A duração, quando existe, fica em cache por faixa e, para vídeo do YouTube,
 pode ser lida da própria página (`lengthSeconds`, que aparece só depois de

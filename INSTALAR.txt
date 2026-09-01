@@ -505,11 +505,11 @@ Presenca de video/musica nao sai depois que parei de assistir:
     - uma aba pausada continua sendo um player enquanto existir. Depois de
       5 minutos parada a presenca sai sozinha; dando play, volta.
 
-Musica/video sem barra de tempo (so um cronometro correndo):
-    - o Firefox nao implementa a posicao de reproducao: devolve sempre
-      zero. Sem posicao nao da para montar a barra "1:23 / 25:36", entao
-      o daemon mostra ha quanto tempo voce esta naquele titulo, que e o
-      unico tempo verdadeiro nesse caso.
+Video/musica sem barra de tempo (so a duracao ao lado do nome):
+    - o Firefox so informa a posicao em rajadas, logo depois de um seek
+      ou de uma troca de video, e volta a zero. Sem leitura real o daemon
+      prefere nao mostrar numero nenhum a mostrar um que parece a posicao
+      do video e nao e. Dar um seek costuma fazer a barra aparecer.
     - players que informam posicao (Chromium, mpv) ganham a barra cheia.
     - no Firefox, instalar a extensao "Plasma Integration" faz o KDE
       publicar um player com a posicao real, e a barra passa a valer.

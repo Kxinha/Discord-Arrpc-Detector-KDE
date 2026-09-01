@@ -175,27 +175,42 @@ def mpris_position(player):
     return reported if reported else None
 
 
-_WATCH_START = {}
+# O Firefox informa a posicao em rajadas: publica por um tempo depois de um
+# seek ou de uma troca de video - quando a pagina chama setPositionState - e
+# volta a zero. Guardar a ultima leitura verdadeira e seguir dali cobre os
+# buracos, e um seek do usuario faz o proprio Firefox reportar de novo,
+# corrigindo a conta sozinho. Sem nenhuma leitura verdadeira nao ha o que
+# projetar: ai a presenca fica sem tempo, em vez de inventar um.
+_POSITION_ANCHOR = {}
+ANCHOR_MAX_AGE = 600
 
 
-def watching_since(player, title):
-    """Instante em que este titulo apareceu pela primeira vez.
+def anchored_position(title, reported, playing=True):
+    """Posicao real, ou a projecao da ultima leitura real enquanto ela vale."""
+    now = time.monotonic()
+    if reported:
+        _POSITION_ANCHOR[title] = (reported, now)
+        return reported
 
-    E o unico tempo que da para afirmar quando o player nao informa posicao:
-    ha quanto tempo a pessoa esta nisso, e nao onde ela esta no video.
-    """
-    if len(_WATCH_START) > 200:
-        _WATCH_START.clear()
-    return _WATCH_START.setdefault((player, title), time.time())
+    anchor = _POSITION_ANCHOR.get(title)
+    if not anchor:
+        return None
+    position, seen = anchor
+    if now - seen > ANCHOR_MAX_AGE:  # velha demais para ainda valer
+        return None
+    if not playing:  # em pausa a posicao nao anda: so adia a ancora
+        _POSITION_ANCHOR[title] = (position, now)
+        return position
+    return position + int((now - seen) * 1_000_000)
 
 
 def position_elsewhere(title):
     """Posicao e duracao vindas de outro player que anuncie o mesmo titulo.
 
-    O Firefox nao informa posicao, mas a extensao Plasma Browser Integration
-    (e navegadores baseados em Chromium) publicam um player MPRIS proprio com
-    os numeros de verdade. Se um deles estiver tocando o mesmo titulo, a barra
-    de progresso passa a ser exata sem precisar de configuracao.
+    O Firefox informa a posicao de forma intermitente. A extensao Plasma
+    Browser Integration e os navegadores baseados em Chromium publicam um
+    player MPRIS proprio com os numeros de verdade; se um deles estiver com o
+    mesmo titulo, a barra passa a ser exata sem precisar de configuracao.
     """
     for name in mpris_names(""):
         if "firefox" in name:
@@ -209,17 +224,29 @@ def position_elsewhere(title):
     return None, None
 
 
-def media_timestamps(player, title, position, length):
-    """Barra completa quando o player informa posicao; senao, so o cronometro."""
+def media_timestamps(title, position, length):
+    """Barra de progresso, so quando alguem souber a posicao de verdade.
+
+    Sem posicao nao ha meio-termo util: um cronometro correndo ao lado do
+    titulo de um video parece a posicao dele, e estaria sempre errado. Melhor
+    nao mostrar tempo nenhum e deixar a duracao no texto.
+    """
     if not position:  # o player nao informa; talvez outro esteja com o mesmo
         position, other_length = position_elsewhere(title)
         length = length or other_length
-
+    if not (position and length):
+        return None
     now = time.time()
-    if position and length:
-        return {"start": int(now - position / 1_000_000),
-                "end": int(now + (length - position) / 1_000_000)}
-    return {"start": int(watching_since(player, title))}
+    return {"start": int(now - position / 1_000_000),
+            "end": int(now + (length - position) / 1_000_000)}
+
+
+def duration_label(length):
+    """25:36 a partir de microssegundos, para acompanhar o texto."""
+    if not length:
+        return ""
+    total = int(length / 1_000_000)
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def firefox_player(wanted):
@@ -285,13 +312,16 @@ def yt_state():
                              "url": f"https://youtu.be/{video.group(1)}"}]
 
     if mpris("PlaybackStatus", player) != "Playing":
-        # em pausa nao ha tempo que faca sentido mostrar correndo
+        anchored_position(title, mpris_position(player), playing=False)
         return f"{channel} (pausado)" if channel else "Pausado", extra or None
 
-    extra["timestamps"] = media_timestamps(
-        player, title, mpris_position(player),
-        track_length(title, meta, video.group(1) if video else None))
-    return (channel or "YouTube"), extra or None
+    length = track_length(title, meta, video.group(1) if video else None)
+    position = anchored_position(title, mpris_position(player))
+    extra["timestamps"] = media_timestamps(title, position, length)
+    text = channel or "YouTube"
+    if not extra["timestamps"] and length:  # sem barra, ao menos a duracao
+        text = f"{text}  ·  {duration_label(length)}"
+    return text, extra
 
 
 _ART_CACHE = {}
@@ -353,11 +383,15 @@ def ytm_state():
              "url": f"https://music.youtube.com/search?q={query}"})
 
     if mpris("PlaybackStatus", player) != "Playing":
+        anchored_position(title, mpris_position(player), playing=False)
         return f"{label} (pausado)", extra or None
 
-    extra["timestamps"] = media_timestamps(
-        player, title, mpris_position(player), track_length(title, meta))
-    return label, extra or None
+    length = track_length(title, meta)
+    position = anchored_position(title, mpris_position(player))
+    extra["timestamps"] = media_timestamps(title, position, length)
+    if not extra["timestamps"] and length:
+        label = f"{label}  ·  {duration_label(length)}"
+    return label, extra
 
 
 def stremio_state():
@@ -888,7 +922,10 @@ def session(proc, game):
             "type": game.get("type", 0),
             "details": details() if callable(details) else details,
             "state": text,
-            "timestamps": fields.get("timestamps", {"start": start}),
+            # jogo sem tempo proprio conta desde que a sessao abriu; midia sem
+            # posicao conhecida manda None e fica sem tempo nenhum
+            "timestamps": fields["timestamps"] if "timestamps" in fields
+                          else {"start": start},
             "assets": {
                 # nome de um Art Asset do app, ou uma URL de imagem; o state
                 # pode trocar a arte a cada faixa (capa da musica, por exemplo)
@@ -896,6 +933,8 @@ def session(proc, game):
                 "large_text": fields.get("large_text") or game["large_text"],
             },
         }
+        if not activity["timestamps"]:
+            del activity["timestamps"]
         if fields.get("buttons"):
             activity["buttons"] = fields["buttons"][:2]  # o Discord aceita 2
         if extra and not isinstance(extra, dict):  # "(45 of 1000)" ao lado do state
