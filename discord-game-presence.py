@@ -102,8 +102,6 @@ def mpris_meta(player):
     return {k: (v["data"] if isinstance(v, dict) else v) for k, v in meta.items()}
 
 
-_POSITION_ANCHOR = {}
-_LAST_TRACK = {}
 _LENGTH_CACHE = {}
 _PAUSED_SINCE = {}
 
@@ -165,42 +163,39 @@ def youtube_length(video):
     return int(m.group(1)) * 1_000_000 if m else None
 
 
-def mpris_position(player, track="", paused=False):
-    """Posicao atual em microssegundos, estimada quando preciso.
+def mpris_position(player):
+    """Posicao informada pelo player, ou None quando ele nao informa.
 
-    O Firefox so atualiza Position quando a pagina manda: fora desses momentos
-    ele devolve 0 fixo, mesmo com o video no meio. Entao guardamos a ultima
-    posicao real vista (ou zero, no comeco de uma faixa nova) junto do instante
-    em que a vimos, e projetamos dali. Qualquer leitura real posterior
-    reancora, o que corrige tambem os seeks do usuario.
+    O Firefox nao implementa isso: devolve 0 fixo e nunca publica
+    mpris:length. Um zero aqui vale como "nao sei", nao como inicio da faixa -
+    fabricar posicao a partir dele fazia a barra mentir depois de qualquer
+    seek, que e justamente quando ela importa.
     """
-    key = (player, track)
     reported = mpris("Position", player)
-    now = time.monotonic()
+    return reported if reported else None
 
-    if reported:  # leitura confiavel: reancora
-        _POSITION_ANCHOR[key] = (reported, now)
-        _LAST_TRACK[player] = track
-        return reported
-    if reported is None:  # player sumiu
-        return None
 
-    anchor = _POSITION_ANCHOR.get(key)
-    if anchor is None:
-        # zero so vale como inicio de faixa se a troca aconteceu sob nosso olhar;
-        # na primeira vez que vemos um player o video pode estar no meio, e
-        # ancorar em zero mostraria um progresso errado
-        previous = _LAST_TRACK.get(player)
-        _LAST_TRACK[player] = track
-        if previous is None or previous == track:
-            return None
-        _POSITION_ANCHOR[key] = (0, now)
-        return 0
-    position, seen = anchor
-    if paused:  # em pausa a posicao nao anda: so adia a ancora
-        _POSITION_ANCHOR[key] = (position, now)
-        return position
-    return position + int((now - seen) * 1_000_000)
+_WATCH_START = {}
+
+
+def watching_since(player, title):
+    """Instante em que este titulo apareceu pela primeira vez.
+
+    E o unico tempo que da para afirmar quando o player nao informa posicao:
+    ha quanto tempo a pessoa esta nisso, e nao onde ela esta no video.
+    """
+    if len(_WATCH_START) > 200:
+        _WATCH_START.clear()
+    return _WATCH_START.setdefault((player, title), time.time())
+
+
+def media_timestamps(player, title, position, length):
+    """Barra completa quando o player informa posicao; senao, so o cronometro."""
+    now = time.time()
+    if position and length:
+        return {"start": int(now - position / 1_000_000),
+                "end": int(now + (length - position) / 1_000_000)}
+    return {"start": int(watching_since(player, title))}
 
 
 def firefox_player(wanted):
@@ -266,17 +261,12 @@ def yt_state():
                              "url": f"https://youtu.be/{video.group(1)}"}]
 
     if mpris("PlaybackStatus", player) != "Playing":
-        mpris_position(player, title, paused=True)  # congela o progresso
+        # em pausa nao ha tempo que faca sentido mostrar correndo
         return f"{channel} (pausado)" if channel else "Pausado", extra or None
 
-    position = mpris_position(player, title)
-    length = track_length(title, meta, video.group(1) if video else None)
-    if position is not None and length:
-        now = time.time()
-        extra["timestamps"] = {
-            "start": int(now - position / 1_000_000),
-            "end": int(now + (length - position) / 1_000_000),
-        }
+    extra["timestamps"] = media_timestamps(
+        player, title, mpris_position(player),
+        track_length(title, meta, video.group(1) if video else None))
     return (channel or "YouTube"), extra or None
 
 
@@ -339,17 +329,10 @@ def ytm_state():
              "url": f"https://music.youtube.com/search?q={query}"})
 
     if mpris("PlaybackStatus", player) != "Playing":
-        mpris_position(player, title, paused=True)  # congela o progresso
         return f"{label} (pausado)", extra or None
 
-    # start + end dao ao Discord o quanto ja passou e o quanto falta
-    position, length = mpris_position(player, title), track_length(title, meta)
-    if position is not None and length:
-        now = time.time()
-        extra["timestamps"] = {
-            "start": int(now - position / 1_000_000),
-            "end": int(now + (length - position) / 1_000_000),
-        }
+    extra["timestamps"] = media_timestamps(
+        player, title, mpris_position(player), track_length(title, meta))
     return label, extra or None
 
 

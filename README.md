@@ -260,17 +260,23 @@ Firefox muda a cada boot e cada aba com mídia vira um player, então a escolha 
 confundem, e é por isso que essas entradas usam uma função em `running` no
 lugar de um nome de processo.
 
-O Firefox é impreciso de dois jeitos, e ambos precisaram de contorno:
+O Firefox **não implementa a posição de reprodução**: `Position` devolve 0
+fixo e `mpris:length` raramente aparece. Sem posição não existe barra de
+progresso honesta — tentei estimar (ancorando na troca de faixa e projetando o
+tempo) e o resultado mentia depois de qualquer seek, que é justamente quando o
+tempo importa.
 
-- **`Position` trava em 0** mesmo com o vídeo no meio. O daemon guarda a última
-  posição real vista e projeta o tempo a partir dela, reancorando sempre que
-  uma leitura verdadeira chega (o que também corrige seeks). Se o vídeo já
-  estava rodando quando o daemon começou a olhar, a posição é tratada como
-  desconhecida e nenhum tempo é publicado — melhor sem barra do que com barra
-  errada.
-- **`mpris:length` some do metadata** no meio da reprodução. A duração fica em
-  cache por faixa e, para vídeo do YouTube, é lida da própria página
-  (`lengthSeconds`, que aparece só depois de ~1 MB de HTML).
+Então o tempo tem dois modos:
+
+- **Player que informa posição** (Chromium, mpv, players nativos): barra
+  completa, `1:23 / 25:36`.
+- **Player que não informa** (Firefox): um cronômetro do tempo desde que aquele
+  título apareceu — "assistindo há X". Não afirma onde você está no vídeo,
+  porque isso não dá para saber.
+
+A duração, quando existe, fica em cache por faixa e, para vídeo do YouTube,
+pode ser lida da própria página (`lengthSeconds`, que aparece só depois de
+~1 MB de HTML).
 
 Capa: o Firefox não publica `mpris:artUrl` utilizável, então a arte vem da
 miniatura do vídeo quando a URL traz o id, ou da busca do iTunes por

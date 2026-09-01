@@ -505,12 +505,13 @@ Presenca de video/musica nao sai depois que parei de assistir:
     - uma aba pausada continua sendo um player enquanto existir. Depois de
       5 minutos parada a presenca sai sozinha; dando play, volta.
 
-Musica/video sem barra de tempo:
-    - o Firefox as vezes nao publica a posicao nem a duracao. Quando a
-      posicao e desconhecida o daemon prefere nao mostrar tempo a
-      mostrar tempo errado. Trocar de faixa costuma resolver.
-    - o Stremio nunca publica posicao: nele o tempo conta desde que o
-      titulo comecou.
+Musica/video sem barra de tempo (so um cronometro correndo):
+    - o Firefox nao implementa a posicao de reproducao: devolve sempre
+      zero. Sem posicao nao da para montar a barra "1:23 / 25:36", entao
+      o daemon mostra ha quanto tempo voce esta naquele titulo, que e o
+      unico tempo verdadeiro nesse caso.
+    - players que informam posicao (Chromium, mpv) ganham a barra cheia.
+    - o Stremio tambem nao publica posicao.
 
 Presenca "presa", de algo que ja fechei:
     - o Discord mantem a ultima atividade publicada mesmo depois que a
