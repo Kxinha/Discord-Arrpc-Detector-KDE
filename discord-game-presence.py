@@ -163,26 +163,32 @@ def youtube_length(video):
     return int(m.group(1)) * 1_000_000 if m else None
 
 
-def mpris_position(player):
+def mpris_position(player, tries=3):
     """Posicao informada pelo player, ou None quando ele nao informa.
 
-    O Firefox nao implementa isso: devolve 0 fixo e nunca publica
-    mpris:length. Um zero aqui vale como "nao sei", nao como inicio da faixa -
-    fabricar posicao a partir dele fazia a barra mentir depois de qualquer
-    seek, que e justamente quando ela importa.
+    O Firefox responde zero em parte das leituras mesmo com o video correndo -
+    duas chamadas seguidas podem dar 16:51 e depois 0 -, entao vale insistir
+    algumas vezes antes de dar a posicao por desconhecida. Um zero nunca vale
+    como inicio da faixa: fabricar posicao a partir dele fazia a barra mentir
+    depois de qualquer seek, que e justamente quando ela importa.
     """
-    reported = mpris("Position", player)
-    return reported if reported else None
+    for attempt in range(tries):
+        reported = mpris("Position", player)
+        if reported:
+            return reported
+        if attempt + 1 < tries:
+            time.sleep(0.3)
+    return None
 
 
-# O Firefox informa a posicao em rajadas: publica por um tempo depois de um
-# seek ou de uma troca de video - quando a pagina chama setPositionState - e
-# volta a zero. Guardar a ultima leitura verdadeira e seguir dali cobre os
-# buracos, e um seek do usuario faz o proprio Firefox reportar de novo,
+# O Firefox so informa a posicao enquanto a aba esta em uso: nesses momentos
+# ela vem certinha (16:47, 16:49, 16:51...), e no resto do tempo ele devolve
+# zero. Guardar a ultima leitura verdadeira e seguir dali cobre os buracos, e
+# voltar para a aba - ou dar um seek - faz o Firefox reportar de novo,
 # corrigindo a conta sozinho. Sem nenhuma leitura verdadeira nao ha o que
 # projetar: ai a presenca fica sem tempo, em vez de inventar um.
 _POSITION_ANCHOR = {}
-ANCHOR_MAX_AGE = 600
+ANCHOR_MAX_AGE = 1800
 
 
 def anchored_position(title, reported, playing=True):
@@ -227,9 +233,9 @@ def position_elsewhere(title):
 def media_timestamps(title, position, length):
     """Barra de progresso, so quando alguem souber a posicao de verdade.
 
-    Sem posicao nao ha meio-termo util: um cronometro correndo ao lado do
-    titulo de um video parece a posicao dele, e estaria sempre errado. Melhor
-    nao mostrar tempo nenhum e deixar a duracao no texto.
+    Sem posicao nao adianta inventar: o Discord ja mostra um contador proprio
+    a partir do momento em que a atividade aparece, e somar a ele um tempo
+    fabricado nao aproxima nada. A duracao entao vai para o texto.
     """
     if not position:  # o player nao informa; talvez outro esteja com o mesmo
         position, other_length = position_elsewhere(title)
@@ -242,10 +248,12 @@ def media_timestamps(title, position, length):
 
 
 def duration_label(length):
-    """25:36 a partir de microssegundos, para acompanhar o texto."""
+    """25:36, ou 1:49:15 quando passa de uma hora."""
     if not length:
         return ""
     total = int(length / 1_000_000)
+    if total >= 3600:
+        return f"{total // 3600}:{total // 60 % 60:02d}:{total % 60:02d}"
     return f"{total // 60}:{total % 60:02d}"
 
 
@@ -672,6 +680,7 @@ GAMES = {
     # Toca no Firefox, entao a presenca segue o MPRIS, nao um processo proprio.
     # Precisa de um app criado em discord.com/developers/applications.
     "youtube-music": {
+        "poll": 5,  # a posicao so aparece em janelas curtas
         "client_id": "1537975657735262368",
         "details": "YouTube Music",
         "state": ytm_state,
@@ -684,6 +693,7 @@ GAMES = {
     # Videos comuns do YouTube, tambem no Firefox e tambem via MPRIS. Precisa de
     # um app proprio: "YouTube" nao existe na base detectavel do Discord.
     "youtube": {
+        "poll": 5,  # a posicao so aparece em janelas curtas
         "client_id": "1538427046760423474",
         "details": yt_title,   # titulo do video
         # usado quando o video nao expoe id na URL (live, shorts, embed)
@@ -697,6 +707,7 @@ GAMES = {
     # O Stremio nao esta na base detectavel do Discord: o client_id vem de um app
     # criado em discord.com/developers/applications. Sem ele, a entrada fica inativa.
     "stremio": {
+        "poll": 5,  # a posicao so aparece em janelas curtas
         "running": lambda: (any("libexec/stremio/stremio" in line
                                 for line in process_cmdlines())
                             and not media_idle("org.mpris.MediaPlayer2.Stremio")),
@@ -906,6 +917,8 @@ def session(proc, game):
     send(sock, 0, {"v": 1, "client_id": game["client_id"]})
     start = int(time.time())
 
+    poll = game.get("poll", POLL)
+
     def current_state():
         s = game["state"]
         if not callable(s):
@@ -947,8 +960,16 @@ def session(proc, game):
             "args": {"pid": os.getpid(), "activity": activity},
             "nonce": str(time.time()),
         })
+        times = activity.get("timestamps") or {}
+        if "end" in times:
+            marca = (f" [{duration_label((time.time() - times['start']) * 1_000_000)}"
+                     f"/{duration_label((times['end'] - times['start']) * 1_000_000)}]")
+        elif times:
+            marca = " [cronometro]"
+        else:
+            marca = " [sem tempo]"
         log(f"publicou {game['large_text']}: "
-            f"{activity['details']} | {activity['state']}")
+            f"{activity['details']} | {activity['state']}{marca}")
 
     published = None
     try:
@@ -960,7 +981,7 @@ def session(proc, game):
             if not same_activity(published, activity):
                 publish(activity)
                 published = activity
-            if STOPPING.wait(POLL):
+            if STOPPING.wait(poll):
                 break
     finally:
         try:
