@@ -511,6 +511,8 @@ Musica/video sem barra de tempo (so um cronometro correndo):
       o daemon mostra ha quanto tempo voce esta naquele titulo, que e o
       unico tempo verdadeiro nesse caso.
     - players que informam posicao (Chromium, mpv) ganham a barra cheia.
+    - no Firefox, instalar a extensao "Plasma Integration" faz o KDE
+      publicar um player com a posicao real, e a barra passa a valer.
     - o Stremio tambem nao publica posicao.
 
 Presenca "presa", de algo que ja fechei:

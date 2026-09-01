@@ -274,6 +274,11 @@ Então o tempo tem dois modos:
   título apareceu — "assistindo há X". Não afirma onde você está no vídeo,
   porque isso não dá para saber.
 
+Antes de cair no cronômetro, o daemon procura o mesmo título em qualquer outro
+player MPRIS. É por isso que instalar a extensão **Plasma Browser Integration**
+no Firefox (ou assistir pelo Chromium) faz a barra correta aparecer sozinha:
+esses publicam um player com posição de verdade.
+
 A duração, quando existe, fica em cache por faixa e, para vídeo do YouTube,
 pode ser lida da própria página (`lengthSeconds`, que aparece só depois de
 ~1 MB de HTML).

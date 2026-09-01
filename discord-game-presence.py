@@ -189,8 +189,32 @@ def watching_since(player, title):
     return _WATCH_START.setdefault((player, title), time.time())
 
 
+def position_elsewhere(title):
+    """Posicao e duracao vindas de outro player que anuncie o mesmo titulo.
+
+    O Firefox nao informa posicao, mas a extensao Plasma Browser Integration
+    (e navegadores baseados em Chromium) publicam um player MPRIS proprio com
+    os numeros de verdade. Se um deles estiver tocando o mesmo titulo, a barra
+    de progresso passa a ser exata sem precisar de configuracao.
+    """
+    for name in mpris_names(""):
+        if "firefox" in name:
+            continue
+        meta = mpris_meta(name)
+        if (meta.get("xesam:title") or "") != title:
+            continue
+        position = mpris("Position", name)
+        if position:
+            return position, meta.get("mpris:length")
+    return None, None
+
+
 def media_timestamps(player, title, position, length):
     """Barra completa quando o player informa posicao; senao, so o cronometro."""
+    if not position:  # o player nao informa; talvez outro esteja com o mesmo
+        position, other_length = position_elsewhere(title)
+        length = length or other_length
+
     now = time.time()
     if position and length:
         return {"start": int(now - position / 1_000_000),
@@ -622,7 +646,6 @@ GAMES = {
                         "1637a3eccd8d9c22acf127e814bf088b.png"),
         "running": ytm_running,
         "type": 2,  # Ouvindo
-        "timer_per_title": True,
     },
     # Videos comuns do YouTube, tambem no Firefox e tambem via MPRIS. Precisa de
     # um app proprio: "YouTube" nao existe na base detectavel do Discord.
@@ -636,7 +659,6 @@ GAMES = {
         "large_text": "YouTube",
         "running": yt_running,
         "type": 3,  # Assistindo
-        "timer_per_title": True,
     },
     # O Stremio nao esta na base detectavel do Discord: o client_id vem de um app
     # criado em discord.com/developers/applications. Sem ele, a entrada fica inativa.
@@ -652,7 +674,6 @@ GAMES = {
         "large_image": ("https://cdn.discordapp.com/app-icons/1536170931540463647/"
                         "2c1838e508bcbe74dbafaaef7180be93.png"),
         "type": 3,  # Assistindo
-        "timer_per_title": True,
     },
     # Roblox roda pelo Sober (flatpak): os processos aparecem com o argumento
     # roblox-player:..., e a experiencia atual sai do log do Sober
@@ -661,7 +682,6 @@ GAMES = {
         "details": roblox_title,
         "state": roblox_state,
         "large_text": "Roblox",
-        "timer_per_title": True,
     },
     "gta-sa.exe": {
         "client_id": "363447565905166336",
@@ -796,17 +816,23 @@ def running(proc):
     return any(proc in line for line in process_cmdlines())
 
 
-def changed(old, new):
-    """Compara estados, tolerando o jitter do fim previsto da reproducao."""
-    if old[0] != new[0] or type(old[1]) is not type(new[1]):
-        return True
-    if isinstance(new[1], dict):  # so republica em pausa/seek, nao a cada poll
-        if new[1].get("buttons") != old[1].get("buttons"):
-            return True
-        ends = (new[1].get("timestamps", {}).get("end", 0),
-                old[1].get("timestamps", {}).get("end", 0))
-        return abs(ends[0] - ends[1]) > 5
-    return old[1] != new[1]
+def same_activity(old, new):
+    """Compara duas atividades ignorando variacao pequena nos tempos.
+
+    A comparacao e sobre a atividade inteira - titulo, texto, imagem, botoes -
+    e nao so sobre uma linha dela: trocar de video dentro do mesmo canal muda
+    o titulo e mais nada, e comparar so o texto de baixo deixava a presenca
+    parada no video anterior.
+    """
+    if old is None or new is None:
+        return old is new
+    times_old = old.get("timestamps") or {}
+    times_new = new.get("timestamps") or {}
+    rest_old = {k: v for k, v in old.items() if k != "timestamps"}
+    rest_new = {k: v for k, v in new.items() if k != "timestamps"}
+    if rest_old != rest_new or set(times_old) != set(times_new):
+        return False
+    return all(abs(times_new[k] - times_old[k]) <= 5 for k in times_new)
 
 
 def clear_presence(client_id):
@@ -835,7 +861,7 @@ def clear_presence(client_id):
 
 
 def session(proc, game):
-    """Publica a presenca de uma partida, do inicio ao fim do jogo."""
+    """Publica a presenca de um app, do inicio ao fim dele."""
     path = ipc_path()
     if not path:
         return
@@ -844,16 +870,18 @@ def session(proc, game):
     sock.settimeout(IPC_TIMEOUT)  # sem isso um Discord mudo travaria a thread
     sock.connect(path)
     send(sock, 0, {"v": 1, "client_id": game["client_id"]})
-
     start = int(time.time())
 
-    def publish(state, restart_timer=False):
+    def current_state():
+        s = game["state"]
+        if not callable(s):
+            return (s, None)
+        return s()  # None significa "nao ha mais nada tocando"
+
+    def build(state):
         # o segundo item e o tamanho da party (lista) ou campos extras (dict:
-        # "timestamps" e "buttons")
-        nonlocal start
+        # "timestamps", "buttons", "large_image", "large_text")
         text, extra = state
-        if restart_timer:  # titulo novo: o contador recomeca do zero
-            start = int(time.time())
         details = game["details"]
         fields = extra if isinstance(extra, dict) else {}
         activity = {
@@ -872,37 +900,29 @@ def session(proc, game):
             activity["buttons"] = fields["buttons"][:2]  # o Discord aceita 2
         if extra and not isinstance(extra, dict):  # "(45 of 1000)" ao lado do state
             activity["party"] = {"id": game["client_id"], "size": list(extra)}
+        return activity
+
+    def publish(activity):
         send(sock, 1, {
             "cmd": "SET_ACTIVITY",
             "args": {"pid": os.getpid(), "activity": activity},
             "nonce": str(time.time()),
         })
-        log(f"publicou {game['large_text']}: {text}")
+        log(f"publicou {game['large_text']}: "
+            f"{activity['details']} | {activity['state']}")
 
-    def current_state():
-        s = game["state"]
-        if not callable(s):
-            return (s, None)
-        return s()  # None significa "nao ha mais nada tocando"
-
+    published = None
     try:
-        state = current_state()
-        if state is None:  # o app saiu entre a checagem e agora
-            return
-        publish(state)
-
         while running(proc) and not STOPPING.is_set():
+            state = current_state()
+            if state is None:
+                break  # o app fechou ou parou; a presenca sai no finally
+            activity = build(state)
+            if not same_activity(published, activity):
+                publish(activity)
+                published = activity
             if STOPPING.wait(POLL):
                 break
-            if not running(proc):
-                break  # nao publica nada depois que o app fechou
-            new = current_state()
-            if new is None:
-                break
-            if changed(state, new):  # ex.: trocou de servidor, deu seek/pausa
-                restart = game.get("timer_per_title") and new[0] != state[0]
-                state = new
-                publish(state, restart)
     finally:
         try:
             send(sock, 1, {"cmd": "SET_ACTIVITY",
