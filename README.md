@@ -42,6 +42,7 @@ daemon publica a presença.
 | **Stremio** | MPRIS | **série — episódio** ("Prison Break — Unearthed (2x9)") |
 | **YouTube** (Firefox) | MPRIS + URL da aba | **título e canal**, miniatura do vídeo, progresso, botão do vídeo |
 | **YouTube Music** (Firefox) | MPRIS + URL da aba | **faixa — artista**, capa do álbum, progresso, botões |
+| **Claude Code** | nome do executável | "Programming" e o tempo de sessão — nada além disso |
 
 Adicionar um app novo é escolher no menu da bandeja, ou editar um JSON —
 nenhuma linha de código. Veja [O ícone de bandeja](#o-ícone-de-bandeja) e
@@ -251,6 +252,14 @@ moram dentro de VPKs. A única fonte é o console. O instalador escreve
 fim do log, traduzindo `c2m3_coaster` → "Dark Carnival — capítulo 3".
 
 > O log só passa a existir **depois de reiniciar o jogo** uma vez.
+
+### Claude Code: só que está aberto
+
+A detecção compara o **nome do executável** (`comm`), não a linha de comando:
+os argumentos carregam o nome da sessão (`-n ...`), e nada do que está sendo
+feito deve virar presença. O texto é fixo — "Claude Code" e "Programming" —
+então não vazam diretório, projeto nem conversa; só que há uma sessão aberta e
+há quanto tempo.
 
 ### Navegador e Stremio: MPRIS
 

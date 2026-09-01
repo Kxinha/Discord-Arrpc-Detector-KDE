@@ -32,6 +32,7 @@ INDICE
     8. campos disponiveis, um por um
     9. exemplos prontos
    10. quando o JSON nao basta (mexer no Python)
+   10b. Claude Code (privacidade)
   PARTE 3 - EXTRAS
    11. mapa do Left 4 Dead 2
    12. diagnostico
@@ -457,6 +458,22 @@ Depois de editar o Python:
 ####################################################################
  PARTE 3 - EXTRAS
 ####################################################################
+
+--------------------------------------------------------------------
+PASSO 10b - CLAUDE CODE (privacidade)
+--------------------------------------------------------------------
+A entrada "claude-code" mostra apenas que ha uma sessao aberta:
+"Claude Code" e "Programming", mais o tempo. A deteccao compara o
+nome do executavel, nao a linha de comando - e nos argumentos que
+vai o nome da sessao (-n ...), e nada dai deve virar presenca.
+
+Como qualquer app que nao e jogo, precisa de um Application ID seu
+(PASSO 6). O icone sugerido esta em packaging/files/claude-code.svg.
+
+Para desligar:
+    {"games": {"claude-code": {"enabled": false}}}
+ou pela bandeja, em "Apps Discord can see".
+
 
 --------------------------------------------------------------------
 PASSO 11 - MAPA DO LEFT 4 DEAD 2

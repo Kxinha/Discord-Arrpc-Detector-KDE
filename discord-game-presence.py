@@ -523,6 +523,24 @@ def roblox_title():
     return info["name"][:128] if info else "Roblox"
 
 
+def claude_running():
+    """Claude Code aberto em algum terminal.
+
+    A comparacao e pelo nome do executavel, nao pela linha de comando: os
+    argumentos carregam o nome da sessao (`-n ...`), e nada do que esta sendo
+    feito deve chegar perto da presenca.
+    """
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            if pathlib.Path(f"/proc/{entry}/comm").read_text().strip() == "claude":
+                return True
+        except OSError:
+            continue  # o processo morreu no meio da leitura
+    return False
+
+
 def steam_libraries():
     """Todas as bibliotecas Steam, inclusive em outros discos."""
     roots = [pathlib.Path.home() / ".local/share/Steam",
@@ -727,6 +745,17 @@ GAMES = {
         "details": roblox_title,
         "state": roblox_state,
         "large_text": "Roblox",
+    },
+    # Diz apenas que ha uma sessao aberta. Nem o nome da sessao, nem o
+    # diretorio, nem o que esta sendo feito: nada disso vira presenca.
+    "claude-code": {
+        "client_id": "1544203323681407046",
+        "details": "Claude Code",
+        "state": "Programming",
+        "large_text": "Claude Code",
+        "large_image": ("https://cdn.discordapp.com/app-icons/1544203323681407046/"
+                        "23856947b5b6c5bcc928d1adc9a3a420.png"),
+        "running": claude_running,
     },
     "gta-sa.exe": {
         "client_id": "363447565905166336",
