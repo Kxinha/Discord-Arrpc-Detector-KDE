@@ -565,21 +565,22 @@ def gta_dir():
 
 
 def gta_pid():
-    """PID do gta-sa.exe rodando sob Proton."""
+    """PID do gta-sa.exe rodando sob Proton.
+
+    Procurar "gta-sa.exe" na linha de comando nao basta: os wrappers do Proton
+    carregam o caminho do jogo nos proprios argumentos, e ler a memoria do
+    wrapper devolve um jogador inexistente. O que identifica o jogo de verdade
+    e ter o executavel mapeado em 0x400000, que e a ImageBase dele.
+    """
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         try:
-            cmdline = pathlib.Path(f"/proc/{entry}/cmdline").read_bytes()
+            maps = pathlib.Path(f"/proc/{entry}/maps").read_text(errors="replace")
         except OSError:
-            continue
-        if b"gta-sa.exe" in cmdline or b"gta_sa.exe" in cmdline.lower():
-            # o processo do jogo e o unico com a imagem mapeada em 0x400000
-            try:
-                maps = pathlib.Path(f"/proc/{entry}/maps").read_text(errors="replace")
-            except OSError:
-                continue
-            if "00400000-" in maps:
+            continue  # processo morreu, ou nao e nosso
+        for line in maps.splitlines():
+            if line.startswith("00400000-") and "gta-sa.exe" in line.lower():
                 return int(entry)
     return None
 
