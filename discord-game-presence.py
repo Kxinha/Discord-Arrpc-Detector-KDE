@@ -19,6 +19,7 @@ import threading
 import urllib.parse
 import urllib.request
 import time
+import zlib
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -541,6 +542,298 @@ def claude_running():
     return False
 
 
+# ---------------------------------------------------------------- GTA SA
+# O jogo guarda tudo em enderecos fixos (imagem carregada em 0x400000, sem
+# ASLR), entao da para ler o estado direto de /proc/<pid>/mem: onde o CJ esta,
+# vida, dinheiro. Os nomes dos lugares saem do proprio jogo - info.zon diz que
+# zona cobre cada coordenada, e o GXT traduz o codigo dela -, o que faz a
+# presenca acompanhar o idioma instalado sem tabela embutida aqui.
+GTA_NAME = "Grand Theft Auto San Andreas"
+GTA_PLAYER_PED = 0xB6F5F0      # ponteiro do CPlayerPed
+GTA_MONEY = 0xB7CE54           # dinheiro exibido no HUD
+GTA_SCRIPT_SPACE = 0xA49960    # inicio das variaveis globais do script
+GTA_ONMISSION = 0x68           # $ONMISSION e a global $26 (26 * 4 = 0x68)
+GTA_ACTIVE_SCRIPTS = 0xA8B42C  # lista encadeada das threads de script ativas
+
+_gta_cache = {"zones": None, "text": None, "dir": None}
+
+
+def gta_dir():
+    if _gta_cache["dir"] is None:
+        _gta_cache["dir"] = steam_game_dir(GTA_NAME) or False
+    return _gta_cache["dir"] or None
+
+
+def gta_pid():
+    """PID do gta-sa.exe rodando sob Proton."""
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            cmdline = pathlib.Path(f"/proc/{entry}/cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"gta-sa.exe" in cmdline or b"gta_sa.exe" in cmdline.lower():
+            # o processo do jogo e o unico com a imagem mapeada em 0x400000
+            try:
+                maps = pathlib.Path(f"/proc/{entry}/maps").read_text(errors="replace")
+            except OSError:
+                continue
+            if "00400000-" in maps:
+                return int(entry)
+    return None
+
+
+def gta_read(pid, addr, size):
+    try:
+        with open(f"/proc/{pid}/mem", "rb", 0) as mem:
+            mem.seek(addr)
+            data = mem.read(size)
+        return data if data and len(data) == size else None
+    except (OSError, ValueError, OverflowError):
+        return None  # jogo fechou, ou o kernel nao deixa ler
+
+
+def gta_u32(pid, addr):
+    raw = gta_read(pid, addr, 4)
+    return struct.unpack("<I", raw)[0] if raw else None
+
+
+def gta_f32(pid, addr):
+    raw = gta_read(pid, addr, 4)
+    return struct.unpack("<f", raw)[0] if raw else None
+
+
+def gta_zones():
+    """Zonas do info.zon: caixas com o codigo de texto de cada bairro."""
+    if _gta_cache["zones"] is not None:
+        return _gta_cache["zones"]
+    zones, path = [], gta_dir()
+    if path:
+        try:
+            for line in (path / "data/info.zon").read_text(errors="replace").splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 10:
+                    continue
+                try:
+                    box = [float(v) for v in parts[2:8]]
+                except ValueError:
+                    continue
+                zones.append((box, parts[9]))
+        except OSError:
+            pass
+    _gta_cache["zones"] = zones
+    return zones
+
+
+def gta_texts():
+    """Textos do jogo (GXT). A chave e o JamCRC do nome, em maiusculas."""
+    if _gta_cache["text"] is not None:
+        return _gta_cache["text"]
+    texts, path = {}, gta_dir()
+    if path:
+        for gxt in ("american.gxt", "english.gxt"):
+            try:
+                texts = parse_gxt(path / "text" / gxt)
+                break
+            except (OSError, ValueError, struct.error, IndexError):
+                continue
+    _gta_cache["text"] = texts
+    return texts
+
+
+def parse_gxt(path):
+    """Tabela de textos do GTA SA: TABL, depois TKEY/TDAT por tabela."""
+    data = pathlib.Path(path).read_bytes()
+    if data[4:8] != b"TABL":
+        raise ValueError("nao parece um GXT de San Andreas")
+    tabl_size = struct.unpack("<I", data[8:12])[0]
+    tables = [(data[i:i + 8].split(b"\0")[0].decode(errors="replace"),
+               struct.unpack("<I", data[i + 8:i + 12])[0])
+              for i in range(12, 12 + tabl_size, 12)]
+
+    texts = {}
+    for name, offset in tables:
+        start = offset if name == "MAIN" else offset + 8
+        if data[start:start + 4] != b"TKEY":
+            continue
+        tkey_size = struct.unpack("<I", data[start + 4:start + 8])[0]
+        keys = [struct.unpack("<II", data[i:i + 8])
+                for i in range(start + 8, start + 8 + tkey_size, 8)]
+        dat = start + 8 + tkey_size
+        if data[dat:dat + 4] != b"TDAT":
+            continue
+        base = dat + 8
+        for text_offset, crc in keys:
+            end = data.find(b"\0", base + text_offset)
+            if end > 0:
+                texts.setdefault(crc, data[base + text_offset:end]
+                                 .decode("cp1252", "replace"))
+    return texts
+
+
+def gta_text(name):
+    """Texto do jogo pelo nome da chave (o hash e um CRC32 invertido)."""
+    crc = (~zlib.crc32(name.upper().encode())) & 0xFFFFFFFF
+    return gta_texts().get(crc)
+
+
+def gta_place(x, y, z):
+    """Nome do bairro onde o CJ esta, no idioma do jogo.
+
+    As caixas do info.zon se sobrepoem - a cidade inteira cobre cada bairro
+    dentro dela -, entao vale a menor que contem o ponto: e ela que tem o nome
+    especifico ("Ganton", e nao "Los Santos").
+    """
+    melhor, menor = None, None
+    for (x1, y1, z1, x2, y2, z2), code in gta_zones():
+        if x1 <= x <= x2 and y1 <= y <= y2 and z1 <= z <= z2:
+            area = (x2 - x1) * (y2 - y1)
+            if menor is None or area < menor:
+                melhor, menor = code, area
+    return (gta_text(melhor) or melhor) if melhor else None
+
+
+def gta_vehicles():
+    """Modelo de veiculo -> chave de texto, lida do vehicles.ide do jogo."""
+    if _gta_cache.get("cars") is not None:
+        return _gta_cache["cars"]
+    cars, path = {}, gta_dir()
+    if path:
+        try:
+            for line in (path / "data/vehicles.ide").read_text(errors="replace").splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) > 5 and parts[0].isdigit():
+                    cars[int(parts[0])] = parts[5]
+        except OSError:
+            pass
+    _gta_cache["cars"] = cars
+    return cars
+
+
+def gta_vehicle_name(pid, ped):
+    """Nome do veiculo em que o CJ esta, ou None se ele estiver a pe."""
+    vehicle = gta_u32(pid, ped + 0x58C)
+    if not vehicle:
+        return None
+    raw = gta_read(pid, vehicle + 0x22, 2)
+    if not raw:
+        return None
+    model = struct.unpack("<H", raw)[0]
+    key = gta_vehicles().get(model)
+    return (gta_text(key) or key) if key else None
+
+
+def gta_wanted(pid, ped):
+    """Nivel de procurado (0 a 6), ou None quando a leitura nao convence."""
+    wanted = gta_u32(pid, ped + 0x480)
+    if not wanted:
+        return None
+    raw = gta_read(pid, wanted + 0x1C, 4)
+    if not raw:
+        return None
+    level = struct.unpack("<i", raw)[0]
+    return level if 0 <= level <= 6 else None
+
+
+_gta_idle_scripts = set()
+
+
+def gta_scripts(pid):
+    """Nomes das threads de script rodando agora."""
+    nomes, node = [], gta_u32(pid, GTA_ACTIVE_SCRIPTS)
+    while node and len(nomes) < 120:
+        raw = gta_read(pid, node + 0x08, 8)
+        if not raw:
+            break
+        nome = raw.split(b"\0")[0].decode("ascii", "replace").strip()
+        if nome and nome != "noname":
+            nomes.append(nome)
+        node = gta_u32(pid, node)
+    return nomes
+
+
+def gta_mission_name(pid, on_mission):
+    """Nome do script que entrou junto com a missao.
+
+    O jogo nao guarda "qual missao" em lugar nenhum obvio, mas carrega uma
+    thread nova quando ela comeca. Guardando quais threads rodam fora de
+    missao, a que sobra na comparacao e a da missao.
+    """
+    global _gta_idle_scripts
+    atuais = set(gta_scripts(pid))
+    if not atuais:
+        return None
+    if not on_mission:
+        _gta_idle_scripts = atuais
+        return None
+    novos = atuais - _gta_idle_scripts
+    return sorted(novos)[0] if novos else None
+
+
+def gta_on_mission(pid):
+    """True quando ha uma missao em andamento ($ONMISSION do script)."""
+    raw = gta_read(pid, GTA_SCRIPT_SPACE + GTA_ONMISSION, 4)
+    if not raw:
+        return False
+    valor = struct.unpack("<i", raw)[0]
+    return valor == 1  # so o 1 conta: lixo em outro offset nao vira "em missao"
+
+
+def gta_running():
+    return gta_pid() is not None
+
+
+def gta_state():
+    """Onde o CJ esta e como ele esta, lido da memoria do jogo."""
+    pid = gta_pid()
+    if not pid:
+        return None
+
+    ped = gta_u32(pid, GTA_PLAYER_PED)
+    if not ped:  # menu principal, ou save ainda carregando
+        return "Jogando", None
+
+    matrix = gta_u32(pid, ped + 0x14)
+    raw = gta_read(pid, (matrix + 0x30) if matrix else (ped + 0x34), 12)
+    if not raw:
+        return "Jogando", None
+    x, y, z = struct.unpack("<3f", raw)
+    if not all(-4000 < v < 4000 for v in (x, y, z)):
+        return "Jogando", None  # coordenada sem sentido: nao publica palpite
+
+    partes = []
+    on_mission = gta_on_mission(pid)
+    mission = gta_mission_name(pid, on_mission)
+    if on_mission:
+        partes.append(f"Em missão: {mission}" if mission else "Em missão")
+
+    place = gta_place(x, y, z)
+    if place:
+        partes.append(place)
+
+    vehicle = gta_vehicle_name(pid, ped)
+    if vehicle:
+        partes.append(vehicle)
+
+    wanted = gta_wanted(pid, ped)
+    if wanted:
+        partes.append("★" * wanted)
+
+    health = gta_f32(pid, ped + 0x540)
+    if health is not None and 0 <= health <= 1000:
+        partes.append(f"{int(health)} HP")
+
+    money = gta_read(pid, GTA_MONEY, 4)
+    if money:
+        valor = struct.unpack("<i", money)[0]
+        if -1_000_000 < valor < 1_000_000_000:
+            partes.append(f"${valor:,}".replace(",", "."))
+
+    return (" · ".join(partes) if partes else "Jogando"), None
+
+
+
 def steam_libraries():
     """Todas as bibliotecas Steam, inclusive em outros discos."""
     roots = [pathlib.Path.home() / ".local/share/Steam",
@@ -760,7 +1053,9 @@ GAMES = {
     "gta-sa.exe": {
         "client_id": "363447565905166336",
         "details": "Grand Theft Auto: San Andreas",
-        "state": "Jogando",
+        "state": gta_state,   # bairro, vida e dinheiro, lidos do jogo
+        "running": gta_running,
+        "poll": 10,
         "large_text": "Grand Theft Auto: San Andreas",
     },
     # casa tanto o binario nativo (hl2_linux -game left4dead2) quanto o .exe sob Proton

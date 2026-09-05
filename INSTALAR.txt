@@ -33,6 +33,7 @@ INDICE
     9. exemplos prontos
    10. quando o JSON nao basta (mexer no Python)
    10b. Claude Code (privacidade)
+   10c. GTA San Andreas (bairro, carro, missao)
   PARTE 3 - EXTRAS
    11. mapa do Left 4 Dead 2
    12. diagnostico
@@ -473,6 +474,28 @@ Como qualquer app que nao e jogo, precisa de um Application ID seu
 Para desligar:
     {"games": {"claude-code": {"enabled": false}}}
 ou pela bandeja, em "Apps Discord can see".
+
+
+--------------------------------------------------------------------
+PASSO 10c - GTA SAN ANDREAS (bairro, carro, missao)
+--------------------------------------------------------------------
+A presenca do GTA SA le o estado do jogo direto da memoria do
+processo - so leitura, nada e alterado. Nao precisa configurar nada:
+os nomes de bairro e de veiculo saem do info.zon, do vehicles.ide e
+do GXT do proprio jogo, entao seguem o idioma instalado.
+
+Requisito do sistema (normalmente ja atendido):
+    cat /proc/sys/kernel/yama/ptrace_scope     # precisa ser 0
+
+Se der 1, o daemon nao consegue ler e a presenca cai para "Jogando".
+Para liberar ate o proximo boot:
+    sudo sysctl kernel.yama.ptrace_scope=0
+
+Se algum dia os enderecos nao baterem (outra versao do executavel),
+a presenca simplesmente mostra menos coisa - nunca um palpite. Para
+recalibrar a deteccao de missao:
+    tools/gta-calibrar-missao.py fora      # sem missao
+    tools/gta-calibrar-missao.py dentro    # durante uma missao
 
 
 --------------------------------------------------------------------

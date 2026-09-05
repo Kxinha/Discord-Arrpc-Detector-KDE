@@ -37,7 +37,7 @@ daemon publica a presença.
 | **RuneScape 3** | processo `rs2client` | "Gielinor" |
 | **Minecraft** (Prism) | processo da instância | instância, **servidor conectado** e **lotação** (ex.: `860 of 5000`) |
 | **Left 4 Dead 2** | `hl2_linux` ou `.exe` no Proton | **campanha e capítulo** ("Dark Carnival — capítulo 3") |
-| **GTA: San Andreas** | `gta-sa.exe` sob Proton | "Jogando" |
+| **GTA: San Andreas** | memória do processo | **bairro, veículo, vida, dinheiro**, estrelas de procurado e "Em missão" |
 | **TBH: Task Bar Hero** | `TaskBarHero.exe` sob Proton | "Jogando" |
 | **Stremio** | MPRIS | **série — episódio** ("Prison Break — Unearthed (2x9)") |
 | **YouTube** (Firefox) | MPRIS + URL da aba | **título e canal**, miniatura do vídeo, progresso, botão do vídeo |
@@ -252,6 +252,27 @@ moram dentro de VPKs. A única fonte é o console. O instalador escreve
 fim do log, traduzindo `c2m3_coaster` → "Dark Carnival — capítulo 3".
 
 > O log só passa a existir **depois de reiniciar o jogo** uma vez.
+
+### GTA San Andreas: lendo o jogo por dentro
+
+O jogo carrega em endereço fixo (`0x400000`, sem ASLR), então o estado sai de
+`/proc/<pid>/mem`: ponteiro do jogador em `0xB6F5F0`, posição pela matriz da
+entidade, vida em `+0x540`, dinheiro em `0xB7CE54`, veículo em `+0x58C`.
+
+Os **nomes vêm do próprio jogo**, não de uma tabela embutida aqui: o
+`data/info.zon` diz que zona cobre cada coordenada — vale a menor caixa que
+contém o ponto, senão sai "Los Santos" no lugar de "Ganton" — e o
+`text/american.gxt` traduz o código dela. O GXT indexa por **CRC32 invertido**
+(JamCRC) do nome da chave, o que dá para confirmar testando contra chaves
+conhecidas. O mesmo caminho nomeia os veículos, via `data/vehicles.ide`. Como
+tudo sai dos arquivos do jogo, a presença acompanha o idioma instalado.
+
+"Em missão" vem de `$ONMISSION`, a variável global `$26` do script. O endereço
+não foi copiado da internet: `tools/gta-calibrar-missao.py` fotografa as
+variáveis fora e dentro de uma missão e mostra quais foram de 0 para 1 — de
+380 candidatos sobraram dois, e um deles é o `$26` conhecido.
+
+Nada disso altera o jogo: só leitura.
 
 ### Claude Code: só que está aberto
 
