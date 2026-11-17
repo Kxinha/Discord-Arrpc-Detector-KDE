@@ -285,92 +285,53 @@ def detectable_apps(force=False):
             return []
 
 
-def executables_index(apps):
-    """basename (no .exe) -> (app id, name), for matching running processes."""
-    index = {}
-    for app in apps:
-        for executable in app.get("executables") or []:
-            name = (executable.get("name") or "").replace("\\", "/").split("/")[-1]
-            name = name.lower().removesuffix(".exe").removesuffix(".app").lstrip(">")
-            if len(name) >= 4 and any(c.isalpha() for c in name):
-                index.setdefault(name, (app["id"], app["name"]))
-    return index
-
-
-# words that show up as executables everywhere and would match the wrong game
-GENERIC_NAMES = {
-    "main", "game", "play", "start", "run", "home", "launcher", "launch",
-    "update", "updater", "setup", "install", "installer", "client", "server",
-    "player", "data", "test", "tools", "tool", "core", "base", "shell",
-    "python", "python3", "bash", "node", "java", "electron", "wine", "wine64",
-    "steam", "steamwebhelper", "containers", "default", "system", "desktop",
-}
-
 # where a real game is *not* going to live; keeps desktop apps out of the list
 SYSTEM_PREFIXES = ("/usr/bin/", "/usr/lib/", "/usr/libexec/", "/usr/sbin/",
                    "/bin/", "/sbin/", "/opt/google/")
 
 
-SHELL_NAMES = {"bash", "sh", "zsh", "dash", "fish", "ksh", "csh", "tcsh"}
+def process_paths(proc):
+    """Paths that identify one process, the way arRPC looks at them.
 
-
-def running_processes():
-    """(argv0, full command line), skipping shell one-liners.
-
-    A command typed in a terminal carries the very name being searched for, so
-    counting it would suggest a game that is not running at all.
+    argv[0] is what counts: under Wine it is the Windows path of the game
+    itself, while Proton's wrappers only carry that path in their arguments
+    (matching those would suggest a game from a launcher script). The real
+    executable is added for native programs started with a relative argv[0].
     """
-    rows = []
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            raw = pathlib.Path(f"/proc/{entry}/cmdline").read_bytes()
-        except OSError:
-            continue  # the process died mid-read
-        argv = raw.decode("utf-8", "replace").split("\0")
-        if not argv or not argv[0]:
-            continue  # kernel thread
-        if (os.path.basename(argv[0]) in SHELL_NAMES
-                and any(a.startswith("-") and "c" in a for a in argv[1:2])):
-            continue
-        rows.append((argv[0], " ".join(argv).strip()))
-    return rows
-
-
-def process_names(argv0, args):
-    """Candidate executable names for one process.
-
-    Only two things count: the program actually being run, and any .exe named
-    on the command line (which is how a game under Proton shows up). Matching
-    loose words from the command line finds the wrong game far too often.
-    """
-    names = []
+    paths = []
+    argv0 = proc.argv[0]
     if not argv0.startswith(SYSTEM_PREFIXES):
-        names.append(argv0.replace("\\", "/").split("/")[-1].lower())
-    for token in re.split(r"[\s]+", args):
-        token = token.strip('"').replace("\\", "/")
-        if token.lower().endswith(".exe"):
-            names.append(token.split("/")[-1].lower().removesuffix(".exe"))
-    return [n for n in names
-            if len(n) >= 4 and any(c.isalpha() for c in n) and n not in GENERIC_NAMES]
+        paths.append(argv0)
+    exe = proc.exe.removesuffix(" (deleted)")
+    if exe and not exe.startswith(SYSTEM_PREFIXES) and "wine" not in exe.rsplit("/", 1)[-1]:
+        paths.append(exe)
+    return paths
 
 
-def suggest_apps(known):
+def suggest_apps(daemon, known_ids, known_keys):
     """Running processes that Discord's catalog recognizes but we don't track."""
-    index = executables_index(detectable_apps())
-    known_lower = [k.lower() for k in known]
-    seen, found = set(), []
-    for argv0, args in running_processes():
-        for name in process_names(argv0, args):
-            hit = index.get(name)
-            if not hit or hit[0] in seen:
-                continue
-            if any(name in existing or existing in name for existing in known_lower):
-                continue
-            seen.add(hit[0])
-            found.append({"client_id": hit[0], "name": hit[1], "process": name})
-    return sorted(found, key=lambda item: item["name"].lower())[:20]
+    if not daemon or not hasattr(daemon, "match_detectable"):
+        return []
+    db = daemon.detectable_index(detectable_apps())
+    known_keys = {k.lower() for k in known_keys}
+    found = {}
+    for proc in daemon.processes():
+        paths = process_paths(proc)
+        if not paths:
+            continue
+        hit = daemon.match_detectable(paths, proc.argstr, db)
+        if not hit:
+            continue
+        app, matched = hit
+        exe = daemon.basename(proc.argv[0]) or daemon.basename(proc.exe)
+        if app["id"] in known_ids or app["id"] in found or exe in known_keys:
+            continue
+        entry = next((x for x in app.get("executables") or []
+                      if (x.get("name") or "").lower() == matched), {})
+        found[app["id"]] = {"client_id": app["id"], "name": app["name"],
+                            "process": exe, "args": entry.get("arguments"),
+                            "icon": app.get("icon_hash")}
+    return sorted(found.values(), key=lambda item: item["name"].lower())[:20]
 
 
 class Tray:
@@ -495,8 +456,13 @@ class Tray:
         games = self.builtin_games()
         custom = set()
         for proc, game in (self.config.get("games") or {}).items():
+            if not isinstance(game, dict):
+                continue
             if proc in games:
-                games[proc] = {**games[proc], **game}
+                merged = {**games[proc], **game}
+                if any(k in game for k in ("exe", "args", "cmdline", "match")):
+                    merged.pop("running", None)  # same rule as the daemon
+                games[proc] = merged
             else:
                 games[proc] = {"large_text": proc, **game}
                 custom.add(proc)
@@ -725,13 +691,21 @@ class Tray:
     def on_add_app(self, _item, found):
         self.config = read_config()
         games = self.config.setdefault("games", {})
-        games[found["process"]] = {
+        entry = {
             "client_id": found["client_id"],
             "details": found["name"],
             "state": "Playing",
             "large_text": found["name"],
             "enabled": True,
+            # the exact executable, so a grep or an editor never counts
+            "exe": found["process"],
         }
+        if found.get("args"):
+            entry["args"] = found["args"]
+        if found.get("icon"):
+            entry["large_image"] = ("https://cdn.discordapp.com/app-icons/"
+                                    f"{found['client_id']}/{found['icon']}.png")
+        games[found["process"]] = entry
         write_config(self.config)
         systemctl("restart", SERVICE)
         notify(f"{found['name']} added.")
@@ -823,10 +797,12 @@ class Tray:
 
     # ------------------------------------------------------------- refresh
     def rescan_suggestions(self, force=False):
-        known = set(self.builtin_games()) | set(self.config.get("games") or {})
+        entries = self.catalog()
+        known_ids = {game.get("client_id") for _p, _l, game, _c in entries}
+        known_keys = {proc for proc, _l, _g, _c in entries}
         if force:
             detectable_apps(force=True)
-        found = suggest_apps(known)
+        found = suggest_apps(self.daemon, known_ids, known_keys)
         GLib.idle_add(self.show_suggestions, found)
 
     def show_suggestions(self, found):
@@ -861,13 +837,15 @@ class Tray:
         """Which enabled apps are open right now (pgrep/MPRIS, so off the UI)."""
         found = set()
         if self.daemon:
-            games = self.builtin_games()
-            for proc, _label, game, _custom in self.catalog():
-                entry = games.get(proc, game)
+            for proc, _label, entry, _custom in self.catalog():
                 if not self.app_enabled(proc, entry):
                     continue
                 try:
-                    if self.daemon.running(entry.get("running", proc)):
+                    if hasattr(self.daemon, "is_running"):
+                        hit = self.daemon.is_running(proc, entry)
+                    else:  # a 1.1 daemon next to a newer tray
+                        hit = self.daemon.running(entry.get("running", proc))
+                    if hit:
                         found.add(proc)
                 except Exception:
                     pass  # a detector may fail on its own; never take the tray down

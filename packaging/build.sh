@@ -8,14 +8,15 @@
 # distro do pacote: rpm/deb/arch sao so arvores de arquivos com metadados.
 set -euo pipefail
 
-VERSION="${VERSION:-1.0.0}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# a versao mora no daemon (discord-game-presence --version); VERSION=x sobrescreve
+VERSION="${VERSION:-$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$ROOT/discord-game-presence.py")}"
 RELEASE="${RELEASE:-1}"
 PKGNAME="discord-game-presence"
 MAINTAINER="kxinha <gabriel17166@gmail.com>"
 URL="https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE"
 SUMMARY="Rich Presence for games and apps Discord ignores on Linux"
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 WORK="$ROOT/.build"
 

@@ -35,13 +35,14 @@ daemon publica a presença.
 | App | Como detecta | O que aparece |
 |---|---|---|
 | **RuneScape 3** | processo `rs2client` | "Gielinor" |
-| **Minecraft** (Prism) | processo da instância | instância, **servidor conectado** e **lotação** (ex.: `860 of 5000`) |
-| **Left 4 Dead 2** | `hl2_linux` ou `.exe` no Proton | **campanha e capítulo** ("Dark Carnival — capítulo 3") |
+| **Minecraft** (Prism, MultiMC, Flatpak) | `java` da instância | nome da instância, **servidor conectado** (o nome que você digitou, lido do log do jogo) e **lotação** (ex.: `860 of 5000`) |
+| **Left 4 Dead 2** | `hl2_linux -game left4dead2` ou `left4dead2.exe` no Proton | **campanha e capítulo** ("Dark Carnival — capítulo 3") |
 | **GTA: San Andreas** | memória do processo | **bairro, veículo, vida, dinheiro**, estrelas de procurado e "Em missão" |
 | **TBH: Task Bar Hero** | `TaskBarHero.exe` sob Proton | "Jogando" |
-| **Stremio** | MPRIS | **série — episódio** ("Prison Break — Unearthed (2x9)") |
-| **YouTube** (Firefox) | MPRIS + URL da aba | **título e canal**, miniatura do vídeo, progresso, botão do vídeo |
-| **YouTube Music** (Firefox) | MPRIS + URL da aba | **faixa — artista**, capa do álbum, progresso, botões |
+| **Roblox** (Sober) | processo `sober` | **nome da experiência**, criador, ícone e quantos estão jogando |
+| **Stremio** (nativo ou Flatpak) | processo + MPRIS | **série — episódio** ("Prison Break — Unearthed (2x9)") |
+| **YouTube** (Firefox, Chrome, Chromium, Brave, Vivaldi, Edge) | MPRIS + URL da aba | **título e canal**, miniatura do vídeo (Shorts e lives também), progresso, botão do vídeo |
+| **YouTube Music** (os mesmos navegadores) | MPRIS + URL da aba | **faixa — artista**, capa do álbum, progresso, botões |
 | **Claude Code** | nome do executável | "Programming" e o tempo de sessão — nada além disso |
 
 Adicionar um app novo é escolher no menu da bandeja, ou editar um JSON —
@@ -102,10 +103,15 @@ Passo a passo manual, sem script: [`INSTALAR.txt`](INSTALAR.txt).
 
 ### Por que Vesktop nativo
 
-O daemon precisa do socket `$XDG_RUNTIME_DIR/discord-ipc-0`. O Discord em
-Flatpak roda em sandbox com `/run` isolado e o socket não fica visível de fora.
-Vesktop nativo (`.deb`/`.rpm`/pacote da distro) cria o socket no runtime dir
-real do usuário — que é o que funciona.
+O daemon precisa do socket `$XDG_RUNTIME_DIR/discord-ipc-N`. Vesktop nativo
+(`.deb`/`.rpm`/pacote da distro) e o Discord nativo criam o socket no runtime
+dir real do usuário, que é o caminho mais simples.
+
+O Discord do Flathub também serve: o `discord.sh` dele repassa o socket para
+`$XDG_RUNTIME_DIR/app/com.discordapp.Discord/discord-ipc-0`, e o daemon procura
+nessas pastas sozinho. O Vesktop em Flatpak não expõe o socket para fora da
+sandbox. Um socket velho, de um cliente que caiu, é pulado em vez de prender o
+daemon nele.
 
 ---
 
@@ -119,7 +125,7 @@ o arquivo de configuração e com o próprio catálogo do daemon.
 | **Daemon: running/stopped** | estado do serviço, no topo |
 | **Detected now:** | o que está sendo detectado neste instante |
 | **Apps Discord can see** | liga e desliga cada app do catálogo; marca com `• detected` o que está aberto agora |
-| ↳ **Add a running app** | varre os processos abertos, cruza com a base de jogos detectáveis do Discord e adiciona o que reconhecer — em um clique, com o Application ID certo |
+| ↳ **Add a running app** | varre os processos abertos, cruza com a base de jogos detectáveis do Discord e adiciona o que reconhecer, em um clique, com o Application ID e o ícone certos. Usa as mesmas regras do arRPC (pedaços do caminho, entradas de launcher ignoradas, argumentos exigidos), com duas proteções a mais: um nome que vários jogos usam (`game.exe`, `client.exe`) só vale se um pedaço maior do caminho desempatar, e jogos nativos (`Unturned.x86_64`) casam com o `.exe` da base quando o nome é de um jogo só. Wrappers do Proton e processos do Wine (`explorer.exe`, `services.exe`) nunca viram sugestão |
 | ↳ **Remove an app I added** | tira do catálogo o que você adicionou |
 | ↳ **Enable all / Disable all** | tudo de uma vez |
 | **Appearance → Icon shape** | nove desenhos próprios: Blob, Controller, Broadcast, Bolt, Chat, Headset, Rocket, Ghost, Dot |
@@ -167,16 +173,30 @@ uma imagem em **General Information → App Icon** e copie o **Application ID**.
 ### 2. Descubra o processo
 
 ```bash
-ps aux | grep -i <nome do app>
+ps -eo comm,args | grep -i <nome do app>
 ```
 
-O casamento é por trecho da linha de comando, então qualquer parte estável
-serve. É isso que permite pegar jogos sob Proton, cujo processo aparece como
-`S:\common\Jogo\jogo.exe` — basta usar `jogo.exe`.
+Use o **nome do executável**: `jogo.exe` para um jogo sob Proton (o processo
+dele aparece como `S:\common\Jogo\jogo.exe`), `Jogo.x86_64` ou `jogo` para
+um nativo. O nome é comparado inteiro, sem diferença de maiúsculas, contra o
+programa que está rodando (`argv[0]`), o `comm` do kernel, o executável real e,
+quando o processo é um interpretador (`bash`, `python3`, `java -jar`, `mono`),
+o script que ele carrega. `.exe`, `.x86_64`, `.x86` e `.sh` podem ficar de fora.
 
-Comandos de shell (`bash -c …`) ficam de fora da busca de propósito: um
-comando digitado no terminal carrega o próprio nome procurado e virava falso
-positivo. Scripts de jogo (o `hl2.sh` do L4D2, por exemplo) continuam valendo.
+Por isso não contam mais como "jogo aberto" um `grep jogo.exe`, um editor
+aberto no `autoexec.cfg`, um `tail -f` no log nem os wrappers do Proton
+(`proton waitforexitandrun …/jogo.exe`), que só carregam o caminho nos
+argumentos. Comandos de shell (`bash -c …`) também ficam de fora.
+
+Para conferir o que o daemon está vendo, sem publicar nada:
+
+```bash
+discord-game-presence --scan      # ou ~/.local/bin/discord-game-presence.py --scan
+```
+
+Ele lista cada app do catálogo, aberto ou fechado, com o PID e o processo que
+provou que está aberto, desde quando, os sockets de IPC encontrados e cada
+player MPRIS com o serviço reconhecido.
 
 ### 3. Escreva a entrada
 
@@ -202,6 +222,27 @@ positivo. Scripts de jogo (o `hl2.sh` do L4D2, por exemplo) continuam valendo.
 | `large_text` | texto ao passar o mouse na imagem |
 | `large_image` | nome de um Art Asset do app **ou** uma URL de imagem |
 | `type` | `0` jogando, `2` ouvindo, `3` assistindo (veja os limites) |
+| `exe` | nome do executável (ou lista); sem ele vale a chave da entrada |
+| `args` | trecho(s) que também precisam estar nos argumentos, ex.: `"-game left4dead2"` |
+| `cmdline` | trecho qualquer da linha de comando, o jeito antigo (editores, `grep` e `tail` não contam) |
+| `match` | lista de regras alternativas, cada uma com `exe`/`args`/`cmdline` |
+| `grace` | segundos de tolerância antes de apagar quando o app some (útil para mídia) |
+
+Uma chave sem `/`, `\`, `:` ou espaço é tratada como `exe`; uma com algum
+deles continua valendo como trecho de linha de comando, então configs antigos
+seguem funcionando. Exemplo com duas regras:
+
+```json
+"meujogo": {
+  "client_id": "1234567890",
+  "match": [{"exe": "meujogo_linux", "args": "-game meujogo"},
+            {"exe": "meujogo.exe"}]
+}
+```
+
+O **tempo de jogo** conta desde que o processo nasceu (lido de `/proc`), e
+não desde que o daemon o viu: reiniciar o daemon, ligar outro app na bandeja ou
+o Discord reconectar não zeram mais o cronômetro.
 
 Depois: `systemctl --user restart discord-game-presence`.
 
@@ -235,13 +276,21 @@ existentes servem de modelo.
 
 ### Minecraft: servidor e lotação
 
-1. acha o PID pela linha de comando (`PrismLauncher/instances`);
-2. extrai a instância de `-Djava.library.path=.../instances/<nome>/natives`;
-3. lista as conexões TCP com `ss -tnp`, descartando loopback e LAN;
-4. resolve os hosts do `servers.dat` da instância e casa com o IP conectado —
-   assim mostra `play.exemplo.com`, e não um IP de CDN;
-5. faz um **Server List Ping** (handshake + status do protocolo Minecraft,
-   ~30 linhas aqui) para pegar `online`/`max`;
+1. acha o processo `java` que leva o caminho de uma instância (Prism, MultiMC,
+   PolyMC, inclusive em Flatpak) ou o main do Minecraft. Um `tail` no log ou o
+   `JavaCheck.jar` do launcher não contam;
+2. a pasta do jogo é o diretório de trabalho desse processo; o nome da
+   instância sai do `instance.cfg` (o nome que o launcher mostra, não a pasta);
+3. lista as conexões TCP estabelecidas com `ss -tnp`, descartando as de HTTP(S)
+   (login, skins, atualização de mod), que antes podiam virar "o servidor";
+4. o nome vem do `logs/latest.log`, onde o próprio jogo escreve
+   `Connecting to <host>, <porta>`: é o endereço que você digitou, inclusive
+   quando o servidor usa registro SRV e o IP conectado não bate com ele.
+   Servidores de LAN e ZeroTier também aparecem. Sem essa linha, vale o
+   `servers.dat` casado por DNS (com cache), e por último o IP;
+5. faz um **Server List Ping** (handshake + status do protocolo Minecraft) no
+   IP e porta realmente conectados, com o nome do servidor no handshake, para
+   pegar `online`/`max`;
 6. publica como `party.size`, que o Discord escreve como "(860 of 5000)".
 
 ### Left 4 Dead 2: mapa
@@ -284,11 +333,28 @@ há quanto tempo.
 
 ### Navegador e Stremio: MPRIS
 
-Tudo vem do D-Bus (`org.mpris.MediaPlayer2`), lido com `busctl`. O bus name do
-Firefox muda a cada boot e cada aba com mídia vira um player, então a escolha é
-**pela URL da aba**, não pelo nome — é assim que YouTube e YouTube Music não se
-confundem, e é por isso que essas entradas usam uma função em `running` no
-lugar de um nome de processo.
+Tudo vem do D-Bus (`org.mpris.MediaPlayer2`), lido com `busctl`, numa chamada
+`GetAll` por player: metadados, estado e posição saem do mesmo instante. O bus
+name do Firefox muda a cada boot e cada aba com mídia vira um player, então a
+escolha é **pela URL da aba**, não pelo nome. É assim que YouTube e YouTube
+Music não se confundem, e quando duas abas do mesmo serviço existem, a que está
+tocando ganha da pausada.
+
+O Firefox põe a URL no MPRIS (`xesam:url`). **Chrome, Chromium, Brave, Vivaldi
+e Edge não põem**: publicam só título, canal e duração. Para eles a URL sai do
+histórico do próprio navegador (o arquivo `History` de cada perfil, aberto só
+para leitura): vale a visita das últimas 24 h cujo título de página é o que
+está tocando (`<título> - YouTube`, `<faixa> | YouTube Music`), com prioridade
+para o título exato. Nada do histórico vai para o Discord além do link do vídeo
+que já está na presença. Sem essa visita (histórico desligado, aba anônima) o
+player não conta como YouTube: melhor não mostrar do que mostrar o app errado.
+Em compensação o Chrome informa a posição sempre, então a barra de progresso
+fica exata.
+
+Links de vídeo em qualquer formato dão a miniatura e o botão: `watch?v=`,
+`youtu.be/`, `/shorts/`, `/live/` e `/embed/`. Uma troca de faixa ou o autoplay
+derrubam o player por um instante; as entradas de mídia têm 10 s de tolerância
+(`grace`) antes de apagar, para a presença não piscar.
 
 O Firefox informa a posição **em rajadas**: publica por um tempo depois de um
 seek ou de uma troca de vídeo — quando a página chama `setPositionState` — e
@@ -329,8 +395,13 @@ artista + título no caso do YouTube Music.
 - Mídia **pausada por mais de 5 minutos** sai do perfil: uma aba de vídeo
   pausada continua sendo um player enquanto existir, e a presença ficava
   pendurada dizendo "(pausado)" por horas. Volta sozinha ao dar play.
-- Página de canal, Shorts e embeds do YouTube não trazem id na URL: sem
-  miniatura e sem duração nesses casos.
+- Página de canal do YouTube não traz id de vídeo: sem miniatura nesse caso.
+- No Chrome e nos outros Chromium, o YouTube só é reconhecido com o histórico
+  ligado (aba anônima não conta), e o primeiro vídeo pode levar alguns
+  segundos para aparecer, o tempo de o navegador gravar a visita.
+- Se o Vesktop estiver com o arRPC ligado, ele também detecta sozinho os jogos
+  que a base do Discord conhece (GTA SA sob Proton, por exemplo). Desligue a
+  entrada correspondente na bandeja se aparecerem duas atividades.
 - O link do artista no YouTube Music leva à **busca**, porque o MPRIS não traz
   o canal.
 
@@ -347,9 +418,13 @@ systemctl --user restart discord-game-presence-tray     # a bandeja
 
 Pela bandeja, os mesmos comandos estão em **Daemon** e no rodapé do menu.
 
-Uma thread por app, cada uma esperando o processo aparecer. Se o Discord
-estiver fechado ou o socket cair, a thread tenta de novo no ciclo seguinte
-(15s). O serviço tem `Restart=always`.
+Uma thread por app, cada uma esperando o processo aparecer (a lista de
+processos é lida uma vez a cada 2 s e dividida entre todas, ~3 ms). Um app
+aberto é conferido a cada 2 s, então fechar o jogo tira a presença do perfil em
+cerca de 2 s; o texto da presença é atualizado no ritmo de cada app (5 a 15 s).
+Se o Discord estiver fechado ou o socket cair, a thread tenta de novo no ciclo
+seguinte. Se o Discord recusar uma atividade, o motivo vai para o log. O
+serviço tem `Restart=always`.
 
 O Discord mantém a última atividade publicada mesmo depois que a conexão
 morre — sem cuidado, fechar o app deixaria a presença pendurada com o
@@ -376,10 +451,25 @@ discord-presence-tray.py                   o ícone de bandeja (GTK3, sem Qt)
 install.sh                                 instalador multi-distro
 INSTALAR.txt                               instalação manual, passo a passo
 docs/config.exemplo.json                   modelo de configuração
+tests/test_detection.py                    testes (python3 -m unittest discover -s tests)
+tests/e2e_fake_discord.py                  ponta a ponta com um Discord falso, isolado em bwrap
 systemd/*.service                          units para instalação por usuário
 packaging/build.sh                         gera .rpm, .deb, .pkg.tar.zst e .AppImage
 packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /usr
 ```
+
+### Testes
+
+```bash
+python3 -m unittest discover -s tests          # regras, YouTube, IPC, base do Discord, Minecraft
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
+      --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
+      python3 tests/e2e_fake_discord.py        # o daemon inteiro contra um Discord falso
+```
+
+O segundo roda o daemon de verdade contra um socket de IPC falso, sem ver o
+Discord real nem a rede, e confere a detecção, o tempo de jogo e a presença
+apagada ao fechar.
 
 ### Gerar os pacotes
 
