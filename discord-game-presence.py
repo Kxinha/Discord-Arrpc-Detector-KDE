@@ -11,12 +11,15 @@ Discord direto e publica a presenca enquanto o jogo estiver aberto.
     discord-game-presence --version
     discord-game-presence --check-update   diz se saiu versao nova
     discord-game-presence --update         instala a versao nova (sha256 conferido)
+    discord-game-presence --suggest        (uso da bandeja) apps abertos que a base
+                                           do Discord reconhece, em JSON
 """
 import fcntl
 import glob
 import gzip
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -34,7 +37,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -375,6 +378,12 @@ def detectable_index(apps):
     return {"index": index, "owners": owners, "stems": stems}
 
 
+def has_argument(args, wanted):
+    """O trecho aparece nos argumentos como palavras inteiras: "-game hl2"
+    nao casa com "-game hl2mp" (mesma regra da deteccao do Vesktop)."""
+    return re.search(r"(?<!\S)" + re.escape(wanted) + r"(?!\S)", args) is not None
+
+
 def match_detectable(paths, args, db, owners=None):
     """Melhor app da base para um processo: (app, nome casado) ou None.
 
@@ -396,7 +405,7 @@ def match_detectable(paths, args, db, owners=None):
                 name = x["name"].lower()
                 if name.startswith(">") and name[1:] != variants[0]:
                     continue  # ">" exige o nome exato do executavel
-                if x.get("arguments") and x["arguments"] not in args:
+                if x.get("arguments") and not has_argument(args, x["arguments"]):
                     continue
                 depth = name.lstrip(">").count("/") + 1
                 base_name = name.lstrip(">").split("/")[-1]
@@ -525,13 +534,13 @@ _PAUSED_SINCE = {}
 PAUSE_GRACE = 300
 
 
-def media_idle(player):
+def media_idle(player, grace=PAUSE_GRACE):
     """True quando o player existe mas esta parado ha tempo demais."""
     if mpris("PlaybackStatus", player) == "Playing":
         _PAUSED_SINCE.pop(player, None)
         return False
     started = _PAUSED_SINCE.setdefault(player, time.monotonic())
-    return time.monotonic() - started > PAUSE_GRACE
+    return grace <= 0 or time.monotonic() - started > grace
 
 
 def track_length(key, meta, video=None):
@@ -1291,7 +1300,7 @@ def browse_since(service, tab):
     if tab.url != url:
         page_since = now
     _BROWSE[service] = (tab.url, page_since, since)
-    if now - page_since > BROWSE_IDLE:
+    if now - page_since > media_option(service, "browse_minutes") * 60:
         return None
     return time.time() - (now - since)
 
@@ -1415,15 +1424,44 @@ def live_video_id(url):
 
 # ------------------------------------------------ YouTube e YouTube Music
 _LAST_STATE = {}
+SERVICE_KEYS = {"youtube": "youtube", "ytm": "youtube-music"}
+# o que cada entrada de midia faz quando nao ha nada tocando de fato
+MEDIA_DEFAULTS = {
+    "show_paused": True,               # pausado continua na presenca...
+    "pause_minutes": PAUSE_GRACE / 60,  # ...por este tempo
+    "show_ads": True,                  # False: o anuncio nao aparece, fica o video
+    "show_browsing": True,             # pagina inicial, canal, busca, sem tocar nada
+    "browse_minutes": BROWSE_IDLE / 60,  # mesma pagina parada por mais que isso some
+    "show_search": False,              # o termo pesquisado
+}
+
+
+def media_option(key, name):
+    """Opcao de uma entrada de midia ("youtube", "ytm", "stremio"...),
+    com o padrao quando o config nao diz nada ou diz algo sem sentido."""
+    game = GAMES.get(SERVICE_KEYS.get(key, key)) or {}
+    default, value = MEDIA_DEFAULTS[name], game.get(name)
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else default
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return default
+
+
+def pause_grace(key):
+    """Segundos que um player pausado ainda conta como aberto."""
+    if not media_option(key, "show_paused"):
+        return 0
+    return media_option(key, "pause_minutes") * 60
 
 
 def service_now(service):
     """("midia", player) ou ("navegando", (aba, desde)) do servico, ou None."""
     media = media_player(service)
-    if media and not media_idle(media["player"]):
+    if media and not media_idle(media["player"], pause_grace(service)):
         browse_since(service, None)
         return "midia", media
-    page = browsing(service)
+    page = browsing(service) if media_option(service, "show_browsing") else None
     since = browse_since(service, page[0] if page else None)
     if page and since:
         return "navegando", (*page, since)
@@ -1470,8 +1508,7 @@ def ytm_state():
 
 
 def browse_state(service, tab, title, since):
-    game = GAMES.get("youtube" if service == "youtube" else "youtube-music") or {}
-    details, link = browse_text(service, tab, title, bool(game.get("show_search")))
+    details, link = browse_text(service, tab, title, media_option(service, "show_search"))
     extra = {"details": details, "timestamps": {"start": int(since)},
              "status_display_type": 0}  # "Assistindo YouTube", nao "Assistindo Pesquisando"
     if link:
@@ -1507,6 +1544,10 @@ def video_state(media):
         if video:
             extra.update(details_url=link, large_image=video_thumbnail(video),
                          large_text=name, small_image=YT_ICON, small_text="YouTube")
+        if not media_option("youtube", "show_ads"):  # so o video que vem depois
+            if channel_url:
+                extra["state_url"] = channel_url
+            return info.get("author_name"), extra
         return "Anúncio", extra
 
     extra = {"details": title or info.get("title") or "YouTube"}
@@ -1577,6 +1618,21 @@ def ytm_art(meta, url=None):
     return art
 
 
+def ad_hidden_song(video):
+    """Durante um anuncio do YT Music, com show_ads desligado: a musica da aba
+    (a que vem depois do anuncio), ou o que estava na presenca antes dele."""
+    info = youtube_oembed(video) if video else {}
+    if not info.get("title"):
+        return _LAST_STATE.get("ytm") or (None, {"details": "YouTube Music", "timestamps": None,
+                                                 "status_display_type": 0})
+    artist = (info.get("author_name") or "").removesuffix(" - Topic")
+    link = f"https://music.youtube.com/watch?v={video}"
+    return artist or "YouTube Music", {
+        "details": info["title"], "timestamps": None, "details_url": link,
+        "large_image": video_thumbnail(video), "large_text": info["title"], "large_url": link,
+        "small_image": YTM_ICON, "small_text": "YouTube Music"}
+
+
 def song_state(media):
     meta, player, url = media["meta"], media["player"], media["url"]
     artist = first(meta.get("xesam:artist")) or ""
@@ -1586,6 +1642,8 @@ def song_state(media):
     link = f"https://music.youtube.com/watch?v={video}" if video else None
 
     if media["ad"]:
+        if not media_option("ytm", "show_ads"):
+            return ad_hidden_song(video)
         return None, {"details": "Anúncio", "timestamps": None, "status_display_type": 0}
 
     extra = {"details": title or "YouTube Music"}
@@ -1631,9 +1689,10 @@ def stremio_running():
     player = stremio_player()
     if not (hit or player):
         return None
-    if player and media_idle(player):
+    grace = pause_grace("stremio")
+    if player and media_idle(player, grace):
         return None
-    if not player and media_idle(MPRIS_PREFIX + "Stremio"):
+    if not player and media_idle(MPRIS_PREFIX + "Stremio", grace):
         return None  # aberto, mas sem tocar nada ha tempo demais
     return hit or player
 
@@ -2495,16 +2554,56 @@ POLL = 15          # atualizacao da presenca de um app aberto
 DETECT_POLL = 5    # procura de apps que ainda nao estao abertos
 ALIVE_CHECK = 2    # um app aberto continua aberto?
 IPC_TIMEOUT = 15
+# o handshake de um app que acabou de reconectar pode demorar (o Discord segura
+# conexoes repetidas): desistir cedo so gerava outra conexao, e mais espera
+HANDSHAKE_TIMEOUT = 40
 
 # Avisa as sessoes que e hora de sair. Sem isso o processo morria com as
 # conexoes abertas e o cliente continuava exibindo a ultima atividade: quem
 # publicou tem de ser quem apaga, na mesma conexao.
 STOPPING = threading.Event()
+WAKE = threading.Event()  # SIGHUP: a pausa confere o config na hora
 
 # entradas renomeadas: o config antigo do usuario continua valendo
 LEGACY_KEYS = {"libexec/stremio/stremio": "stremio"}
 
 CONFIG = config_home() / "discord-game-presence.json"
+
+
+# Campos que so mudam o que aparece, nao o que e detectado: um SIGHUP (a
+# bandeja manda um a cada ajuste em Presence details) os rele sem reiniciar.
+# Reiniciar obrigava a reconectar, e o Discord segura a reconexao do mesmo
+# app por 10 s ou mais.
+OPTION_KEYS = ("detail", "show_thumbnail", "show_links", "show_buttons", "show_time",
+               "show_paused", "pause_minutes", "show_ads", "show_browsing",
+               "browse_minutes", "show_search", "status_display")
+_BUILTIN_OPTIONS = {}
+RELOADS = [0]  # cada releitura soma 1: as sessoes republicam na hora
+
+
+def reload_options():
+    """Rele do config so os OPTION_KEYS das entradas que ja estao rodando."""
+    try:
+        data = json.loads(CONFIG.read_text())
+    except (OSError, ValueError):
+        data = {}
+    games = data.get("games") if isinstance(data, dict) else None
+    games = games if isinstance(games, dict) else {}
+    for old, new in LEGACY_KEYS.items():
+        if isinstance(games.get(old), dict):
+            games = {**games, new: {**games[old], **(games.get(new) or {})}}
+    for key, game in GAMES.items():
+        fields = games.get(key) if isinstance(games.get(key), dict) else {}
+        base = _BUILTIN_OPTIONS.get(key, {})
+        for name in OPTION_KEYS:
+            if name in fields:
+                game[name] = fields[name]
+            elif name in base:
+                game[name] = base[name]
+            else:
+                game.pop(name, None)
+    RELOADS[0] += 1
+    log("opcoes de exibicao relidas")
 
 
 def load_config():
@@ -2519,6 +2618,8 @@ def load_config():
     Outras chaves de primeiro nivel sao ignoradas de proposito: o icone da
     bandeja guarda as preferencias dele no mesmo arquivo, em "tray".
     """
+    for key, game in GAMES.items():  # o que vale sem config, para o reload
+        _BUILTIN_OPTIONS.setdefault(key, {n: game[n] for n in OPTION_KEYS if n in game})
     try:
         data = json.loads(CONFIG.read_text())
     except (OSError, ValueError):
@@ -2619,10 +2720,11 @@ def ipc_connect(client_id):
     """
     for path in ipc_candidates():
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(IPC_TIMEOUT)  # sem isso um Discord mudo travaria a thread
+        sock.settimeout(HANDSHAKE_TIMEOUT)  # sem isso um Discord mudo travaria a thread
         try:
             sock.connect(path)
             send(sock, 0, {"v": 1, "client_id": client_id})
+            sock.settimeout(IPC_TIMEOUT)
             return sock
         except (OSError, ConnectionError, ValueError, IPCError):
             sock.close()
@@ -2792,7 +2894,61 @@ def build_activity(game, state, start):
         activity["buttons"] = fields["buttons"]
     if extra and not isinstance(extra, dict):  # "(45 of 1000)" ao lado do state
         activity["party"] = {"id": game["client_id"], "size": list(extra)}
-    return sanitize_activity(activity)
+    return sanitize_activity(apply_options(game, activity, start))
+
+
+# Quanto cada entrada mostra. "detail" escolhe o nivel e os show_* trocam um
+# item so: {"detail": "basic", "show_buttons": true} fica sem links nos
+# textos, mas com os botoes.
+DETAIL_LEVELS = {
+    # tudo: titulo, capa, links nos textos, botoes, barra de progresso
+    "full": {"text": True, "thumbnail": True, "links": True, "buttons": True, "time": True},
+    # o que esta tocando, sem nada clicavel
+    "basic": {"text": True, "thumbnail": True, "links": False, "buttons": False, "time": True},
+    # so o app ("Assistindo YouTube") e ha quanto tempo
+    "minimal": {"text": False, "thumbnail": False, "links": False, "buttons": False,
+                "time": True},
+}
+SHOW_KEYS = ("thumbnail", "links", "buttons", "time")
+
+
+def presence_options(game):
+    level = game.get("detail")
+    options = dict(DETAIL_LEVELS[level if level in DETAIL_LEVELS else "full"])
+    for name in SHOW_KEYS:
+        if isinstance(game.get(f"show_{name}"), bool):
+            options[name] = game[f"show_{name}"]
+    return options
+
+
+def apply_options(game, activity, start):
+    """Tira da atividade o que a entrada pediu para nao mostrar."""
+    options = presence_options(game)
+    out = dict(activity)
+    assets = dict(out.get("assets") or {})
+    if not options["text"]:
+        details = game.get("details")
+        out["details"] = None if callable(details) else details
+        out["state"] = None
+        out["status_display_type"] = 0  # a lista de membros mostra o app
+        out.pop("party", None)
+        out["timestamps"] = {"start": int(start)}  # ha quanto tempo, nao a faixa
+    if not options["links"]:
+        for key in ("details_url", "state_url"):
+            out.pop(key, None)
+        for key in ("large_url", "small_url"):
+            assets.pop(key, None)
+    if not options["buttons"]:
+        out.pop("buttons", None)
+    if not options["thumbnail"]:
+        assets["large_image"] = game.get("large_image", "game")
+        assets["large_text"] = game["large_text"]
+        for key in ("small_image", "small_text", "small_url"):
+            assets.pop(key, None)
+    if not options["time"]:
+        out.pop("timestamps", None)
+    out["assets"] = assets
+    return out
 
 
 def session(key, game):
@@ -2831,8 +2987,9 @@ def session(key, game):
             marca = f" [desde {time.strftime('%H:%M', time.localtime(times['start']))}]"
         else:
             marca = " [sem tempo]"
-        log(f"publicou {game['large_text']}: "
-            f"{activity.get('details')} | {activity.get('state')}{marca}")
+        texto = " | ".join(filter(None, (activity.get("details"), activity.get("state"))))
+        log(f"publicou {game['large_text']}: {texto or '(so o nome)'}{marca}")
+        status_showing(key, game, activity)
 
     published, refused, missing, legacy = None, None, None, False
     state, next_state = first_state, time.monotonic() + poll
@@ -2866,27 +3023,32 @@ def session(key, game):
             # Confere a cada poucos segundos se o app continua aberto, e so
             # rele o estado no ritmo dele: fechar o jogo tirava a presenca do
             # perfil so na volta seguinte, ate 15 s depois.
+            reloads = RELOADS[0]
             while not STOPPING.wait(ALIVE_CHECK):
                 hit = detect(key, game)
                 if not hit:
                     state = None
                     break
-                if state is None or time.monotonic() >= next_state:
+                if (state is None or time.monotonic() >= next_state
+                        or RELOADS[0] != reloads):
                     state = current_state()
                     next_state = time.monotonic() + poll
                     break
             if STOPPING.is_set():
                 break
     finally:
+        cleared = False
         try:
             send(sock, 1, {"cmd": "SET_ACTIVITY",
                            "args": {"pid": os.getpid(), "activity": None},
                            "nonce": str(time.time())})
+            cleared = True
             if published:
                 log(f"apagou {game['large_text']}")
         except (OSError, ValueError, ConnectionError, IPCError) as error:
             log(f"nao consegui apagar {game['large_text']}: {error}")
         sock.close()
+        status_showing(key, game, stale=bool(published) and not cleared)
 
 
 def watch(key, game):
@@ -2911,6 +3073,236 @@ def watch(key, game):
 def active_games():
     return [(key, game) for key, game in GAMES.items()
             if game.get("client_id") and game.get("enabled", True)]
+
+
+# ------------------------------------------------------------- estado
+# O que esta publicado agora, num arquivo que so o usuario le
+# ($XDG_RUNTIME_DIR e 0700). A bandeja mostra isso em vez de repetir a
+# deteccao inteira a cada poucos segundos, e mostra o que o Discord recebeu de
+# fato, nao o que parece estar aberto.
+_STATUS = {"showing": {}, "stale": [], "paused": False, "paused_until": None,
+           "stopped": False, "reload": False}
+_STATUS_LOCK = threading.Lock()
+
+
+def status_path():
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    root = pathlib.Path(base) if base else (
+        pathlib.Path(os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache"))
+    return root / "discord-game-presence" / "status.json"
+
+
+def update_status(change):
+    """Aplica change(estado) e grava o arquivo, tudo sob a mesma trava."""
+    with _STATUS_LOCK:
+        change(_STATUS)
+        path = status_path()
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = path.with_name(f".status-{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"pid": os.getpid(), "version": VERSION, **_STATUS},
+                                      ensure_ascii=False))
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+
+def status_showing(key, game, activity=None, stale=False):
+    """Marca o que uma sessao publicou, ou desmarca quando ela sai (sem
+    activity). stale: a sessao saiu sem conseguir apagar, entao o client_id
+    fica anotado para a proxima execucao apagar."""
+    def change(status):
+        showing, client_id = status["showing"], game.get("client_id")
+        if activity is not None:
+            showing[key] = {"name": game["large_text"], "client_id": client_id,
+                            "details": activity.get("details"), "state": activity.get("state")}
+            return
+        showing.pop(key, None)
+        ids = set(status["stale"])
+        (ids.add if stale else ids.discard)(client_id)
+        status["stale"] = sorted(i for i in ids if i)
+    update_status(change)
+
+
+def daemon_alive(pid):
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+            return b"discord-game-presence" in f.read()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def leftover_ids(all_ids):
+    """Client ids que a execucao anterior pode ter deixado no Discord.
+
+    Cada conexao conta: o Discord segura conexoes repetidas do mesmo app
+    (medido no Vesktop 1.6.9: 0,2 s, depois 6,7 s, depois 15 s sem resposta).
+    Apagar o catalogo inteiro a cada inicio, e de novo a cada saida, atrasava
+    em ~27 s a volta da presenca depois de um restart. Agora so se apaga o que
+    o arquivo de estado diz que ficou no ar; sem arquivo (boot, versao
+    antiga), tudo, como antes.
+    """
+    try:
+        data = json.loads(status_path().read_text())
+        pid = int(data["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return list(all_ids)
+    if pid != os.getpid() and daemon_alive(pid) and not data.get("stopped"):
+        return []  # outro daemon rodando: o que esta no ar e dele
+    ids = [v.get("client_id") for v in (data.get("showing") or {}).values()
+           if isinstance(v, dict)]
+    ids += data.get("stale") or []
+    return [i for i in dict.fromkeys(ids) if isinstance(i, str) and i]
+
+
+def paused_until(data=None):
+    """Pausa pedida pela bandeja ({"pause": {"until": epoch ou null}}):
+    o fim dela, math.inf para "ate retomar", ou None sem pausa valendo."""
+    if data is None:
+        try:
+            data = json.loads(CONFIG.read_text())
+        except (OSError, ValueError):
+            return None
+    pause = data.get("pause") if isinstance(data, dict) else None
+    if not isinstance(pause, dict):
+        return None
+    until = pause.get("until")
+    if until is None:
+        return math.inf
+    if isinstance(until, (int, float)) and not isinstance(until, bool) and until > time.time():
+        return float(until)
+    return None
+
+
+PAUSE_CHECK = 5  # le o config de novo nesse ritmo: retomar nao depende de restart
+
+
+def wait_pause():
+    """Segura o daemon enquanto a presenca estiver pausada. False se for hora
+    de sair."""
+    until = paused_until()
+    if not until:
+        return True
+    shown = "ate retomar" if until == math.inf else time.strftime(
+        "ate %H:%M", time.localtime(until))
+    log(f"presenca pausada {shown}")
+    update_status(lambda s: s.update(paused=True,
+                                     paused_until=None if until == math.inf else until))
+    while until:
+        WAKE.wait(min(PAUSE_CHECK, max(1, until - time.time())))
+        WAKE.clear()
+        if STOPPING.is_set():
+            return False
+        until = paused_until()  # a bandeja pode retomar antes da hora
+    update_status(lambda s: s.update(paused=False, paused_until=None))
+    log("pausa encerrada")
+    return True
+
+
+# ------------------------------------------------------- sugestoes da bandeja
+# "Add a running app" casa os processos abertos com a base do Discord. Ela tem
+# 13 MB e vira uns 50 MB de objetos Python, entao a bandeja roda isto num
+# processo a parte (--suggest): a memoria volta inteira quando ele sai.
+DETECTABLE_URL = "https://discord.com/api/v9/applications/detectable"
+DETECTABLE_MAX_AGE = 7 * 24 * 3600
+# onde um jogo de verdade nao vai estar; tira os apps do desktop da lista
+SYSTEM_PREFIXES = ("/usr/bin/", "/usr/lib/", "/usr/libexec/", "/usr/sbin/",
+                   "/bin/", "/sbin/", "/opt/google/")
+# servicos do proprio Wine (explorer.exe, o steam.exe do Proton)
+WINE_SYSTEM = ("c:/windows/", "/drive_c/windows/")
+
+
+def detectable_cache():
+    return (pathlib.Path(os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache")
+            / "discord-game-presence" / "detectable.json")
+
+
+def detectable_apps(force=False):
+    """A lista publica de jogos detectaveis do Discord, com cache em disco."""
+    cache = detectable_cache()
+    try:
+        fresh = time.time() - cache.stat().st_mtime < DETECTABLE_MAX_AGE
+    except OSError:
+        fresh = False
+    if fresh and not force:
+        try:
+            return json.loads(cache.read_text())
+        except (OSError, ValueError):
+            pass
+    try:
+        request = urllib.request.Request(DETECTABLE_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=20) as r:
+            raw = r.read().decode("utf-8", "replace")
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            raise ValueError("resposta inesperada")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_name(f".detectable-{os.getpid()}.tmp")
+        tmp.write_text(raw)
+        os.replace(tmp, cache)
+        return data
+    except (OSError, ValueError):
+        try:
+            return json.loads(cache.read_text())
+        except (OSError, ValueError):
+            return []
+
+
+def process_paths(proc):
+    """Caminhos que identificam um processo, do jeito que o arRPC olha.
+
+    O argv[0] e o que conta: no Wine ele e o caminho Windows do proprio jogo,
+    enquanto os wrappers do Proton so levam esse caminho nos argumentos (casar
+    com eles sugeriria um jogo a partir de um script de launcher). O
+    executavel real entra para programas nativos abertos com argv[0] relativo.
+    """
+    paths = []
+    argv0 = proc.argv[0]
+    if (not argv0.startswith(SYSTEM_PREFIXES)
+            and not any(w in argv0.lower().replace("\\", "/") for w in WINE_SYSTEM)):
+        paths.append(argv0)
+    exe = proc.exe.removesuffix(" (deleted)")
+    if exe and not exe.startswith(SYSTEM_PREFIXES) and "wine" not in basename(exe):
+        paths.append(exe)
+    return paths
+
+
+def suggest_running(known_ids, known_keys, apps=None):
+    """Processos abertos que a base do Discord reconhece e que ainda nao estao
+    no catalogo."""
+    db = detectable_index(detectable_apps() if apps is None else apps)
+    known_ids = set(known_ids)
+    known_keys = {k.lower() for k in known_keys}
+    found = {}
+    for proc in processes():
+        paths = process_paths(proc)
+        if not paths:
+            continue
+        hit = match_detectable(paths, proc.argstr, db)
+        if not hit:
+            continue
+        app, matched = hit
+        exe = basename(proc.argv[0]) or basename(proc.exe)
+        if app["id"] in known_ids or app["id"] in found or exe in known_keys:
+            continue
+        entry = next((x for x in app.get("executables") or []
+                      if (x.get("name") or "").lower() == matched), {})
+        found[app["id"]] = {"client_id": app["id"], "name": app["name"],
+                            "process": exe, "args": entry.get("arguments"),
+                            "icon": app.get("icon_hash")}
+    return sorted(found.values(), key=lambda item: item["name"].lower())[:20]
+
+
+def suggest_cli():
+    """--suggest: le {"known_ids", "known_keys", "refresh"} da entrada padrao
+    e imprime a lista de sugestoes em JSON."""
+    try:
+        request = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        request = {}
+    apps = detectable_apps(force=bool(request.get("refresh")))
+    print(json.dumps(suggest_running(request.get("known_ids") or [],
+                                     request.get("known_keys") or [], apps)))
 
 
 # ------------------------------------------------------------- atualizacao
@@ -3209,7 +3601,12 @@ def scan_report():
     """--scan: o que esta aberto agora, por qual processo, desde quando."""
     load_config()
     lines = [f"discord-game-presence {VERSION}",
-             f"sockets IPC: {', '.join(ipc_candidates()) or 'nenhum'}", ""]
+             f"sockets IPC: {', '.join(ipc_candidates()) or 'nenhum'}"]
+    until = paused_until()
+    if until:
+        lines.append("presenca pausada " + ("ate retomar" if until == math.inf else
+                                            time.strftime("ate %H:%M", time.localtime(until))))
+    lines.append("")
     for key, game in sorted(GAMES.items(), key=lambda kv: kv[1]["large_text"].lower()):
         enabled = game.get("client_id") and game.get("enabled", True)
         try:
@@ -3230,6 +3627,9 @@ def scan_report():
         since = f", aberto desde {time.strftime('%H:%M:%S', time.localtime(start))}" if start else ""
         mark = "ABERTO " if hit else "fechado"
         off = "" if enabled else "  [desligado]"
+        level = game.get("detail")
+        if enabled and level in DETAIL_LEVELS and level != "full":
+            off = f"  [mostra: {level}]"
         lines.append(f"{mark}  {game['large_text']}{off}"
                      + (f"\n         {why}{since}" if hit else ""))
     found = media_now()
@@ -3257,6 +3657,9 @@ def main():
         return
     if "--check-update" in sys.argv[1:] or "--update" in sys.argv[1:]:
         sys.exit(update_cli("--update" in sys.argv[1:]))
+    if "--suggest" in sys.argv[1:]:
+        suggest_cli()
+        return
 
     load_config()
     active = active_games()
@@ -3265,25 +3668,38 @@ def main():
     # apagar a presenca que ele deixou
     ids = list(dict.fromkeys(game["client_id"] for game in GAMES.values()
                              if game.get("client_id")))
-    for client_id in ids:  # restos de uma execucao anterior
+    for client_id in leftover_ids(ids):  # restos de uma execucao anterior
         clear_presence(client_id)
 
-    threads = [threading.Thread(target=watch, args=(key, game), daemon=True)
-               for key, game in active]
+    threads = []
 
     def shutdown(*_):
         STOPPING.set()  # cada sessao apaga a sua presenca e fecha a conexao
+        WAKE.set()
         deadline = time.monotonic() + 6
         for thread in threads:
             thread.join(timeout=max(0.1, deadline - time.monotonic()))
-        for client_id in ids:  # rede de seguranca, para o que nao fechou
+        with _STATUS_LOCK:  # rede de seguranca, so para o que nao fechou
+            left = [v["client_id"] for v in _STATUS["showing"].values()] + _STATUS["stale"]
+        for client_id in dict.fromkeys(filter(None, left)):
             clear_presence(client_id)
+        update_status(lambda s: s.update(showing={}, stale=[], stopped=True))
         log("encerrado")
         os._exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    def reload(*_):
+        reload_options()
+        WAKE.set()
+    signal.signal(signal.SIGHUP, reload)
 
+    # "reload": a bandeja sabe que pode mandar SIGHUP em vez de reiniciar
+    update_status(lambda s: s.update(reload=True))
+    if not wait_pause():
+        return
+    threads += [threading.Thread(target=watch, args=(key, game), daemon=True)
+                for key, game in active]
     log(f"{VERSION}: vigiando {len(threads)} app(s): "
         + ", ".join(sorted(game["large_text"] for _, game in active)))
     for thread in threads:

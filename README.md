@@ -122,10 +122,12 @@ o arquivo de configuração e com o próprio catálogo do daemon.
 
 | Menu | O que faz |
 |---|---|
-| **Daemon: running/stopped** | estado do serviço, no topo |
-| **Showing now:** | o que está sendo publicado neste instante |
-| **Apps Discord can see** | liga e desliga cada app do catálogo; marca com `• detected` o que está aberto agora |
-| ↳ **Add a running app** | varre os processos abertos, cruza com a base de jogos detectáveis do Discord e adiciona o que reconhecer, em um clique, com o Application ID e o ícone certos. Usa as mesmas regras do arRPC (pedaços do caminho, entradas de launcher ignoradas, argumentos exigidos), com duas proteções a mais: um nome que vários jogos usam (`game.exe`, `client.exe`) só vale se um pedaço maior do caminho desempatar, e jogos nativos (`Unturned.x86_64`) casam com o `.exe` da base quando o nome é de um jogo só. Wrappers do Proton e processos do Wine (`explorer.exe`, `services.exe`) nunca viram sugestão |
+| **Daemon: running/stopped/paused** | estado do serviço, no topo |
+| **Showing now:** | o que o Discord recebeu de fato, dito pelo próprio daemon (não um palpite da bandeja) |
+| **Pause presence** | 15 minutes, 1 hour, 4 hours ou Until I resume: apaga tudo do perfil e segura o daemon até a hora. Vale também depois de reiniciar o PC. **▶ Resume presence** volta na hora |
+| **Apps Discord can see** | liga e desliga cada app do catálogo; marca com `• showing` o que está publicado agora (`• open` quando o daemon está parado) |
+| ↳ **Add a running app** | varre os processos abertos, cruza com a base de jogos detectáveis do Discord e adiciona o que reconhecer, em um clique, com o Application ID e o ícone certos. Usa as mesmas regras do arRPC (pedaços do caminho, entradas de launcher ignoradas, argumentos exigidos como palavras inteiras, então `-game hl2` não casa com `-game hl2mp`), com duas proteções a mais: um nome que vários jogos usam (`game.exe`, `client.exe`) só vale se um pedaço maior do caminho desempatar, e jogos nativos (`Unturned.x86_64`) casam com o `.exe` da base quando o nome é de um jogo só. Wrappers do Proton e processos do Wine (`C:\windows\…`) nunca viram sugestão. A varredura roda num processo à parte, que devolve a memória quando sai |
+| **Presence details** | um submenu por app com o que os amigos veem: o nível (tudo, sem nada clicável, só o nome do app), capa, links, botões, tempo e, nos apps de mídia, pausa, anúncios, navegação e busca. Vale na hora, sem reiniciar o daemon, então a presença não some do perfil. Veja [O que cada app mostra](#o-que-cada-app-mostra) |
 | ↳ **Remove an app I added** | tira do catálogo o que você adicionou |
 | ↳ **Enable all / Disable all** | tudo de uma vez |
 | **Appearance → Icon shape** | nove desenhos próprios: Blob, Controller, Broadcast, Bolt, Chat, Headset, Rocket, Ghost, Dot |
@@ -173,6 +175,50 @@ vale para script e AppImage, que não pedem senha.
 
 Pelo terminal: `discord-game-presence --check-update` e
 `discord-game-presence --update`.
+
+### O que cada app mostra
+
+Cada entrada tem um nível, e os `show_*` trocam um item só. Pela bandeja em
+**Presence details**, ou no JSON:
+
+```json
+{
+  "games": {
+    "youtube":       { "detail": "basic", "show_ads": false, "show_browsing": false },
+    "youtube-music": { "show_paused": false },
+    "PrismLauncher/instances": { "detail": "minimal" }
+  }
+}
+```
+
+| `detail` | O que vai para o perfil |
+|---|---|
+| `"full"` (padrão) | tudo: título, canal ou artista, capa, links nos textos, botões, barra de progresso |
+| `"basic"` | o mesmo texto e a capa, sem nada clicável |
+| `"minimal"` | só o app e há quanto tempo: "Assistindo YouTube", "Jogando Minecraft", sem servidor, mapa ou título |
+
+| Campo | Padrão | Para que serve |
+|---|---|---|
+| `show_thumbnail` | do nível | capa do vídeo ou da música; desligado fica o ícone do app |
+| `show_links` | do nível | links no título, no canal e na imagem |
+| `show_buttons` | do nível | os botões "Assistir no YouTube", "Ver o canal"… |
+| `show_time` | `true` | cronômetro e barra de progresso |
+| `show_paused` | `true` | mídia pausada continua no perfil; `false` tira na hora |
+| `pause_minutes` | `5` | por quanto tempo a mídia pausada continua no perfil |
+| `show_ads` | `true` | `false` não mostra "Anúncio": fica o vídeo ou a música que vem depois |
+| `show_browsing` | `true` | `false` só mostra quando algo está tocando, nunca a página inicial ou um canal |
+| `browse_minutes` | `15` | a mesma página parada por mais que isso sai do perfil |
+| `show_search` | `false` | mostra o termo pesquisado ("Pesquisando blender") |
+
+Os campos de mídia valem para `youtube` e `youtube-music`; `show_paused` e
+`pause_minutes` valem também para o `stremio`. A pausa da bandeja fica em
+`"pause": {"until": <epoch>}` (ou `null`, até retomar), no mesmo arquivo.
+
+Esses campos (e `status_display`) são relidos sem reiniciar: a bandeja manda
+`SIGHUP` ao daemon, e quem edita o JSON à mão usa
+`systemctl --user reload discord-game-presence`. A presença é republicada na
+mesma conexão. Trocar `client_id`, `match` ou `exe` ainda pede `restart`. Se o
+arquivo mudar por fora, o menu da bandeja se redesenha sozinho em até 8 s.
 
 ---
 
@@ -257,7 +303,7 @@ player MPRIS com o serviço reconhecido.
 | `match` | lista de regras alternativas, cada uma com `exe`/`args`/`cmdline` |
 | `grace` | segundos de tolerância antes de apagar quando o app some (útil para mídia) |
 | `status_display` | o que a lista de membros mostra depois de "Jogando/Ouvindo/Assistindo": `"name"` (o app), `"details"` (1ª linha) ou `"state"` (2ª linha) |
-| `show_search` | só YouTube e YouTube Music: `true` mostra o termo pesquisado ("Pesquisando blender"); o padrão esconde |
+| `detail`, `show_*` | quanto a presença mostra; veja [O que cada app mostra](#o-que-cada-app-mostra) |
 
 Uma chave sem `/`, `\`, `:` ou espaço é tratada como `exe`; uma com algum
 deles continua valendo como trecho de linha de comando, então configs antigos
@@ -455,7 +501,8 @@ artista + título no caso do YouTube Music.
   cronômetro reinicia a cada título novo.
 - Mídia **pausada por mais de 5 minutos** sai do perfil: uma aba de vídeo
   pausada continua sendo um player enquanto existir, e a presença ficava
-  pendurada dizendo "(pausado)" por horas. Volta sozinha ao dar play.
+  pendurada dizendo "(pausado)" por horas. Volta sozinha ao dar play. O tempo
+  muda em `pause_minutes`, e `show_paused: false` tira na hora.
 - Página de canal do YouTube não traz id de vídeo: sem miniatura nesse caso.
 - No Chrome e nos outros Chromium, aba anônima não conta (não entra no arquivo
   de sessão). Um vídeo novo pode levar uns 5 s para aparecer, o tempo de o
@@ -466,9 +513,15 @@ artista + título no caso do YouTube Music.
   sessão, cujo título pode estar velho: aparece "Num canal" em vez do nome.
 - O daemon consulta `youtube.com/oembed` e `i.ytimg.com` com o id do vídeo que
   já vai na presença, para conferir o título e escolher a miniatura.
-- Se o Vesktop estiver com o arRPC ligado, ele também detecta sozinho os jogos
-  que a base do Discord conhece (GTA SA sob Proton, por exemplo). Desligue a
-  entrada correspondente na bandeja se aparecerem duas atividades.
+- O Vesktop detecta sozinho os jogos que a base do Discord conhece, com a opção
+  de Rich Presence (`arRPC`) ligada, que é o padrão. Desde a 1.6.9 ele usa um
+  módulo nativo próprio ([Vencord/GameDetection](https://github.com/Vencord/GameDetection))
+  que reconhece **todo jogo aberto pela Steam pelo AppId** (`reaper SteamLaunch
+  AppId=N`, cruzado com `third_party_skus` da base), além de jogos nativos e do
+  Wine pelo executável. Por isso este projeto não repete a detecção da Steam:
+  ele cuida do que o Vesktop não sabe (o que toca no navegador, Stremio,
+  servidor do Minecraft, mapa do L4D2, bairro do GTA). Se o mesmo jogo aparecer
+  duas vezes no perfil, desligue a entrada dele na bandeja.
 - O link do artista no YouTube Music leva à **busca**, porque o MPRIS não traz
   o canal.
 
@@ -478,7 +531,8 @@ artista + título no caso do YouTube Music.
 
 ```bash
 systemctl --user status  discord-game-presence          # estado
-systemctl --user restart discord-game-presence          # após editar a config
+systemctl --user reload  discord-game-presence          # relê as opções de exibição, sem reconectar
+systemctl --user restart discord-game-presence          # após trocar apps, client_id ou match
 journalctl --user -u discord-game-presence -f           # log ao vivo
 systemctl --user restart discord-game-presence-tray     # a bandeja
 ```
@@ -495,10 +549,23 @@ serviço tem `Restart=always`.
 
 O Discord mantém a última atividade publicada mesmo depois que a conexão
 morre — sem cuidado, fechar o app deixaria a presença pendurada com o
-cronômetro correndo. Por isso o daemon apaga as presenças **ao iniciar**
-(restos de execuções anteriores, inclusive de um `restart` anterior) e **ao
-ser encerrado** (`SIGTERM`/`SIGINT`), e nunca publica um estado genérico
-quando o player já sumiu. Se algo ficar preso, `restart` resolve.
+cronômetro correndo. Por isso o daemon apaga **ao ser encerrado**
+(`SIGTERM`/`SIGINT`) tudo o que publicou, e **ao iniciar** apaga só o que uma
+execução anterior deixou no perfil: o arquivo de estado abaixo diz o quê, e
+depois de uma saída limpa não sobra nada para apagar. Nunca publica um estado
+genérico quando o player já sumiu. Se algo ficar preso, **Clear stuck
+presence** na bandeja apaga todos os apps do catálogo.
+
+Isso importa porque o Discord segura quem reconecta logo em seguida com o
+mesmo Application ID. Medido no Vesktop 1.6.9, a primeira reconexão rápida
+passa em menos de 1 s, a seguinte espera uns 7 s e a próxima chega a 15 s.
+Antes, um `restart` apagava os ~10 IDs do catálogo na saída e de novo na
+entrada, e a presença sumia do perfil por quase 30 s; agora são poucos
+segundos, e trocar uma opção não reconecta nada.
+
+O que está publicado fica em `$XDG_RUNTIME_DIR/discord-game-presence/status.json`
+(pasta que só o seu usuário lê). É dali que a bandeja tira o **Showing now**,
+em vez de repetir a detecção inteira a cada 8 s.
 
 ## Desinstalar
 
@@ -519,6 +586,8 @@ install.sh                                 instalador multi-distro
 INSTALAR.txt                               instalação manual, passo a passo
 docs/config.exemplo.json                   modelo de configuração
 tests/test_detection.py                    testes (python3 -m unittest discover -s tests)
+tests/test_options.py                      níveis de detalhe, pausa, arquivo de estado, sugestões
+tests/test_update.py                       atualização contra um GitHub falso
 tests/e2e_fake_discord.py                  ponta a ponta com um Discord falso, isolado em bwrap
 systemd/*.service                          units para instalação por usuário
 packaging/build.sh                         gera .rpm, .deb, .pkg.tar.zst e .AppImage
@@ -528,7 +597,7 @@ packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /us
 ### Testes
 
 ```bash
-python3 -m unittest discover -s tests          # regras, YouTube, abas do Chrome, IPC, atualização, Minecraft
+python3 -m unittest discover -s tests          # regras, YouTube, abas do Chrome, IPC, opções, pausa, atualização
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
       --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
       python3 tests/e2e_fake_discord.py        # o daemon inteiro contra um Discord falso
@@ -536,8 +605,8 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
 
 O segundo roda o daemon de verdade contra um socket de IPC falso, sem ver o
 Discord real nem a rede, e confere a detecção, o tempo de jogo, a volta para a
-presença sem links quando o Discord recusa os campos novos, e a presença
-apagada ao fechar.
+presença sem links quando o Discord recusa os campos novos, a presença
+apagada ao fechar, o arquivo de estado, a pausa e o nível `minimal`.
 
 ### Gerar os pacotes
 

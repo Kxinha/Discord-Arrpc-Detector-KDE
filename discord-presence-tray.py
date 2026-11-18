@@ -12,11 +12,11 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
-import urllib.request
 
 import gi
 
@@ -32,7 +32,6 @@ from gi.repository import GLib, Gtk  # noqa: E402
 APP = "discord-game-presence"
 SERVICE = f"{APP}.service"
 PROJECT_URL = "https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE"
-DETECTABLE_URL = "https://discord.com/api/v9/applications/detectable"
 
 HOME = pathlib.Path.home()
 CONFIG_HOME = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
@@ -40,17 +39,27 @@ CACHE_HOME = pathlib.Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache"))
 CONFIG = CONFIG_HOME / f"{APP}.json"
 CACHE = CACHE_HOME / APP
 ICONS = CACHE / "icons"
-DETECTABLE_CACHE = CACHE / "detectable.json"
 TRAY_SERVICE = f"{APP}-tray.service"
 KDEGLOBALS = CONFIG_HOME / "kdeglobals"
 
 REFRESH_SECONDS = 8
-DETECTABLE_MAX_AGE = 7 * 24 * 3600
 UPDATE_FIRST_CHECK = 45          # seconds after the tray starts
 UPDATE_EVERY = 6 * 3600          # then every six hours
 UPDATE_MODES = [("Install updates automatically", "auto"),
                 ("Notify me, I click to install", "notify"),
                 ("Never check", "off")]
+PAUSES = [("15 minutes", 15), ("1 hour", 60), ("4 hours", 240), ("Until I resume", None)]
+DETAIL_CHOICES = [("Everything: title, cover, links, buttons", "full"),
+                  ("Title and cover, nothing clickable", "basic"),
+                  ("Only the app name and time", "minimal")]
+SHOW_CHOICES = [("Cover image", "thumbnail"), ("Links in the text", "links"),
+                ("Buttons", "buttons"), ("Timer and progress bar", "time")]
+# entries that play media; the daemon reads the same keys (MEDIA_DEFAULTS)
+MEDIA_KEYS = {"youtube": True, "youtube-music": True, "stremio": False}  # True: web
+MEDIA_CHOICES = [("Show ads as \u201cAd\u201d", "show_ads"),
+                 ("Show browsing (home, channel, search)", "show_browsing"),
+                 ("Show what I search", "show_search")]
+PAUSE_MINUTES = [1, 5, 15, 30, 60]
 KIND_LABELS = {"script": "installer script", "pacman": "pacman package",
                "deb": ".deb package", "rpm": ".rpm package", "appimage": "AppImage",
                "manual": "manual copy"}
@@ -204,6 +213,38 @@ def service_enabled():
     return systemctl("is-enabled", SERVICE).stdout.strip() == "enabled"
 
 
+def restart_daemon():
+    """Restart without waiting: stopping clears every presence first, which
+    takes a few seconds, and the menu used to freeze for that long."""
+    systemctl("--no-block", "restart", SERVICE)
+    if Tray.current:
+        Tray.current.refresh_soon()
+
+
+def reload_daemon(daemon):
+    """Apply a config change without restarting, when the daemon allows it.
+
+    Display options and the end of a pause are read again on SIGHUP, so the
+    presence never leaves Discord. A restart reconnects every app being
+    shown and Discord slows down a client id that reconnects right away
+    (about 12 s without presence, measured on Vesktop 1.6.9). Older daemons,
+    or none running, fall back to the restart.
+    """
+    status = daemon_status(daemon)
+    if status and status.get("reload") is True:
+        try:
+            os.kill(int(status["pid"]), signal.SIGHUP)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        else:
+            if Tray.current:
+                Tray.current.refresh_soon()
+            return True
+    if service_active():
+        restart_daemon()
+    return False
+
+
 def notify(body, title="Discord Presence", icon=None):
     if shutil.which("notify-send"):
         subprocess.Popen(["notify-send", "-a", "Discord Presence"]
@@ -305,84 +346,65 @@ def write_config(config):
     CONFIG.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
 
 
-def detectable_apps(force=False):
-    """Discord's public list of detectable games, cached on disk."""
-    fresh = (DETECTABLE_CACHE.exists()
-             and time.time() - DETECTABLE_CACHE.stat().st_mtime < DETECTABLE_MAX_AGE)
-    if fresh and not force:
-        try:
-            return json.loads(DETECTABLE_CACHE.read_text())
-        except (OSError, ValueError):
-            pass
-    try:
-        request = urllib.request.Request(DETECTABLE_URL,
-                                         headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(request, timeout=20) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
-        CACHE.mkdir(parents=True, exist_ok=True)
-        DETECTABLE_CACHE.write_text(json.dumps(data))
-        return data
-    except (OSError, ValueError):
-        try:
-            return json.loads(DETECTABLE_CACHE.read_text())
-        except (OSError, ValueError):
-            return []
+def daemon_status(daemon):
+    """What the running daemon says it is publishing, or None.
 
-
-# where a real game is *not* going to live; keeps desktop apps out of the list
-SYSTEM_PREFIXES = ("/usr/bin/", "/usr/lib/", "/usr/libexec/", "/usr/sbin/",
-                   "/bin/", "/sbin/", "/opt/google/")
-
-
-def process_paths(proc):
-    """Paths that identify one process, the way arRPC looks at them.
-
-    argv[0] is what counts: under Wine it is the Windows path of the game
-    itself, while Proton's wrappers only carry that path in their arguments
-    (matching those would suggest a game from a launcher script). The real
-    executable is added for native programs started with a relative argv[0].
+    The daemon writes this file itself (see status_path() there) whenever a
+    presence goes up or comes down, so the tray never has to repeat the
+    detection to know. A file left by a daemon that died does not count.
     """
-    paths = []
-    argv0 = proc.argv[0]
-    if not argv0.startswith(SYSTEM_PREFIXES):
-        paths.append(argv0)
-    exe = proc.exe.removesuffix(" (deleted)")
-    if exe and not exe.startswith(SYSTEM_PREFIXES) and "wine" not in exe.rsplit("/", 1)[-1]:
-        paths.append(exe)
-    return paths
+    if not daemon or not hasattr(daemon, "status_path"):
+        return None
+    try:
+        data = json.loads(daemon.status_path().read_text())
+        pid = int(data["pid"])
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"discord-game-presence" not in f.read():
+                return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return data if isinstance(data.get("showing"), dict) else None
 
 
-def suggest_apps(daemon, known_ids, known_keys):
-    """Running processes that Discord's catalog recognizes but we don't track."""
-    if not daemon or not hasattr(daemon, "match_detectable"):
+def suggest_apps(daemon, known_ids, known_keys, refresh=False):
+    """Running apps that Discord's catalog recognizes but we don't track.
+
+    The work runs in a separate daemon process (--suggest): the catalog is
+    13 MB of JSON and Python keeps most of that memory after a scan in a
+    long-lived process, which is how the tray used to sit at 100 MB.
+    """
+    if not daemon or not hasattr(daemon, "suggest_running"):
         return []
-    db = daemon.detectable_index(detectable_apps())
-    known_keys = {k.lower() for k in known_keys}
-    found = {}
-    for proc in daemon.processes():
-        paths = process_paths(proc)
-        if not paths:
-            continue
-        hit = daemon.match_detectable(paths, proc.argstr, db)
-        if not hit:
-            continue
-        app, matched = hit
-        exe = daemon.basename(proc.argv[0]) or daemon.basename(proc.exe)
-        if app["id"] in known_ids or app["id"] in found or exe in known_keys:
-            continue
-        entry = next((x for x in app.get("executables") or []
-                      if (x.get("name") or "").lower() == matched), {})
-        found[app["id"]] = {"client_id": app["id"], "name": app["name"],
-                            "process": exe, "args": entry.get("arguments"),
-                            "icon": app.get("icon_hash")}
-    return sorted(found.values(), key=lambda item: item["name"].lower())[:20]
+    request = json.dumps({"known_ids": sorted(filter(None, known_ids)),
+                          "known_keys": sorted(known_keys), "refresh": refresh})
+    path = getattr(daemon, "__file__", None)
+    if path:
+        try:
+            done = subprocess.run([sys.executable, "-I", path, "--suggest"], input=request,
+                                  capture_output=True, text=True, timeout=120)
+            found = json.loads(done.stdout) if done.returncode == 0 else None
+            if isinstance(found, list):
+                return found
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+    try:  # no helper process: same work here, costs memory but still works
+        apps = daemon.detectable_apps(force=refresh)
+        return daemon.suggest_running(known_ids, known_keys, apps)
+    except Exception:
+        return []
 
 
 class Tray:
+    current = None  # the running tray, for refresh_soon() after a restart
+
     def __init__(self):
+        Tray.current = self
         self.daemon = load_daemon()
         self.config = read_config()
         self.detected = set()
+        self.published = False  # detected came from the daemon, not a scan
+        self.scanning = False
+        self.menu_paused = False
         self.suggestions = []
         self.updating = False   # guards programmatic toggles
         self.release = None     # a newer release, once a check finds one
@@ -448,11 +470,14 @@ class Tray:
 
     # ---------------------------------------------------------------- menu
     def rebuild_menu(self):
+        self.hidden_radios = []
         self.menu = self.build_menu()
         self.indicator.set_menu(self.menu)
 
     def build_menu(self):
         menu = Gtk.Menu()
+        self.menu_paused = self.pause_until() is not None
+        self.menu_games = self.games_snapshot()
 
         self.status_item = Gtk.MenuItem(label="Checking…")
         self.status_item.set_sensitive(False)
@@ -461,6 +486,20 @@ class Tray:
         self.showing_item = Gtk.MenuItem(label="")
         self.showing_item.set_sensitive(False)
         menu.append(self.showing_item)
+
+        if self.pause_until() is not None:
+            resume = Gtk.MenuItem(label="▶  Resume presence")
+            resume.connect("activate", lambda *_: self.resume())
+            menu.append(resume)
+        else:
+            pause = Gtk.MenuItem(label="Pause presence")
+            pause_menu = Gtk.Menu()
+            for label, minutes in PAUSES:
+                item = Gtk.MenuItem(label=label)
+                item.connect("activate", lambda _i, m=minutes: self.pause_for(m))
+                pause_menu.append(item)
+            pause.set_submenu(pause_menu)
+            menu.append(pause)
 
         if self.release or self.update_busy == "installing":
             menu.append(Gtk.SeparatorMenuItem())
@@ -477,6 +516,10 @@ class Tray:
         apps = Gtk.MenuItem(label="Apps Discord can see")
         apps.set_submenu(self.build_apps_menu())
         menu.append(apps)
+
+        details = Gtk.MenuItem(label="Presence details")
+        details.set_submenu(self.build_presence_menu())
+        menu.append(details)
 
         appearance = Gtk.MenuItem(label="Appearance")
         appearance.set_submenu(self.build_appearance_menu())
@@ -615,12 +658,201 @@ class Tray:
         menu.show_all()
         return menu
 
+    def build_presence_menu(self):
+        """How much each app shows: one submenu per app, same keys as the
+        daemon reads from the config."""
+        menu = Gtk.Menu()
+        hint = Gtk.MenuItem(label="What your friends see, per app")
+        hint.set_sensitive(False)
+        menu.append(hint)
+        menu.append(Gtk.SeparatorMenuItem())
+        for proc, label, game, _custom in self.catalog():
+            if not self.app_enabled(proc, game):
+                continue
+            item = Gtk.MenuItem(label=label)
+            item.set_submenu(self.build_app_detail_menu(proc, game))
+            menu.append(item)
+        menu.show_all()
+        return menu
+
+    def build_app_detail_menu(self, proc, game):
+        menu = Gtk.Menu()
+        level = game.get("detail") if game.get("detail") in {v for _l, v in DETAIL_CHOICES} \
+            else "full"
+        group = []
+        for label, value in DETAIL_CHOICES:
+            item = Gtk.RadioMenuItem(label=label, group=group[0] if group else None)
+            group.append(item)
+            item.set_active(value == level)
+            item.connect("toggled", self.on_detail_level, proc, value)
+            menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        shown = self.presence_options(game)
+        for label, name in SHOW_CHOICES:
+            item = Gtk.CheckMenuItem(label=label)
+            item.set_active(shown.get(name, True))
+            item.set_sensitive(shown.get("text", True) or name == "time")
+            item.connect("toggled", self.on_app_option, proc, f"show_{name}")
+            menu.append(item)
+
+        if proc in MEDIA_KEYS:
+            menu.append(Gtk.SeparatorMenuItem())
+            keep = Gtk.CheckMenuItem(label="Keep showing while paused")
+            keep.set_active(self.media_option(game, "show_paused"))
+            keep.connect("toggled", self.on_app_option, proc, "show_paused")
+            menu.append(keep)
+
+            after = Gtk.MenuItem(label="Hide paused media after")
+            after_menu = Gtk.Menu()
+            current = self.media_option(game, "pause_minutes")
+            choices = sorted(set(PAUSE_MINUTES) | {current})
+            group = []
+            for minutes in choices:
+                text = f"{minutes:g} minute" + ("" if minutes == 1 else "s")
+                item = Gtk.RadioMenuItem(label=text, group=group[0] if group else None)
+                group.append(item)
+                item.set_active(minutes == current)
+                item.connect("toggled", self.on_pause_minutes, proc, minutes)
+                after_menu.append(item)
+            after.set_submenu(after_menu)
+            after.set_sensitive(self.media_option(game, "show_paused"))
+            menu.append(after)
+
+            if MEDIA_KEYS[proc]:
+                for label, name in MEDIA_CHOICES:
+                    item = Gtk.CheckMenuItem(label=label)
+                    item.set_active(self.media_option(game, name))
+                    item.connect("toggled", self.on_app_option, proc, name)
+                    menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        reset = Gtk.MenuItem(label="Back to the defaults")
+        reset.connect("activate", lambda *_: self.reset_app_options(proc))
+        menu.append(reset)
+        menu.show_all()
+        return menu
+
+    def presence_options(self, game):
+        options = getattr(self.daemon, "presence_options", None)
+        if not options:
+            return {name: True for _label, name in SHOW_CHOICES}
+        try:
+            return options(game)
+        except Exception:
+            return {name: True for _label, name in SHOW_CHOICES}
+
+    def media_option(self, game, name):
+        defaults = getattr(self.daemon, "MEDIA_DEFAULTS", {})
+        default = defaults.get(name, True if name.startswith("show_") else 5)
+        value = game.get(name)
+        if isinstance(default, bool):
+            return value if isinstance(value, bool) else default
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            return value
+        return default
+
+    def set_app_options(self, proc, change, message=None):
+        self.config = read_config()
+        entry = self.config.setdefault("games", {}).setdefault(proc, {})
+        change(entry)
+        write_config(self.config)
+        reload_daemon(self.daemon)  # live, the presence stays up
+        self.rebuild_menu()
+        if message:
+            notify(message)
+
+    def on_detail_level(self, item, proc, level):
+        if self.updating or not item.get_active():
+            return
+
+        def change(entry):
+            entry["detail"] = level
+            for _label, name in SHOW_CHOICES:  # the level decides again
+                entry.pop(f"show_{name}", None)
+        self.set_app_options(proc, change)
+
+    def on_app_option(self, item, proc, key):
+        if self.updating:
+            return
+        self.set_app_options(proc, lambda entry: entry.__setitem__(key, item.get_active()))
+
+    def on_pause_minutes(self, item, proc, minutes):
+        if self.updating or not item.get_active():
+            return
+        self.set_app_options(proc, lambda entry: entry.__setitem__("pause_minutes", minutes))
+
+    def reset_app_options(self, proc):
+        keys = (["detail", "pause_minutes", "show_paused", "browse_minutes"]
+                + [f"show_{name}" for _label, name in SHOW_CHOICES]
+                + [name for _label, name in MEDIA_CHOICES])
+
+        def change(entry):
+            for key in keys:
+                entry.pop(key, None)
+        self.set_app_options(proc, change, "Presence details back to the defaults.")
+
+    # ------------------------------------------------------------- pause
+    def pause_until(self):
+        """None when not paused, 0 for "until I resume", else the epoch."""
+        pause = self.config.get("pause")
+        if not isinstance(pause, dict):
+            return None
+        until = pause.get("until")
+        if until is None:
+            return 0
+        if isinstance(until, (int, float)) and until > time.time():
+            return until
+        return None
+
+    def pause_for(self, minutes):
+        self.config = read_config()
+        until = None if minutes is None else int(time.time() + minutes * 60)
+        self.config["pause"] = {"until": until}
+        write_config(self.config)
+        status = daemon_status(self.daemon)
+        if status and status.get("paused"):
+            reload_daemon(self.daemon)  # already waiting, only the end changes
+        elif service_active():
+            restart_daemon()  # it clears everything and waits out the pause
+        notify("Presence paused " + ("until you resume it." if until is None else
+                                     time.strftime("until %H:%M.", time.localtime(until))))
+        self.rebuild_menu()
+        self.refresh()
+
+    def resume(self, quiet=False):
+        self.config = read_config()
+        had = self.config.pop("pause", None) is not None
+        if had:
+            write_config(self.config)
+        status = daemon_status(self.daemon)
+        if status and status.get("paused"):
+            reload_daemon(self.daemon)  # wakes the waiting daemon right away
+        elif service_active() and not status:
+            restart_daemon()
+        if not quiet:
+            notify("Presence resumed.")
+        self.rebuild_menu()
+        self.refresh()
+
+    def radio_leader(self):
+        """A radio group whose first item is never shown.
+
+        GTK always keeps one item of a group checked, the first by default.
+        When no visible choice applies (a theme icon instead of a shape), that
+        put a false check on the first item, and clicking it did nothing,
+        since it was already "on".
+        """
+        leader = Gtk.RadioMenuItem(label="none")
+        self.hidden_radios.append(leader)  # unparented: keep it alive
+        return leader
+
     def build_appearance_menu(self):
         menu = Gtk.Menu()
 
         shapes = Gtk.MenuItem(label="Icon shape")
         shape_menu = Gtk.Menu()
-        group = []
+        group = [self.radio_leader()]  # none checked while a theme icon is in use
         for label, shape in SHAPES:
             item = Gtk.RadioMenuItem(label=label, group=group[0] if group else None)
             group.append(item)
@@ -633,7 +865,7 @@ class Tray:
         themed = Gtk.MenuItem(label="Icon from desktop theme")
         theme_menu = Gtk.Menu()
         icon_theme = Gtk.IconTheme.get_default()
-        group = []
+        group = [self.radio_leader()]  # none checked while a drawn shape is in use
         for label, name in THEME_ICONS:
             if not icon_theme.has_icon(name):
                 continue
@@ -926,11 +1158,17 @@ class Tray:
 
     # ------------------------------------------------------------- actions
     def on_toggle_service(self, *_):
-        systemctl("stop" if service_active() else "start", SERVICE)
+        if service_active():
+            systemctl("--no-block", "stop", SERVICE)
+        else:
+            if self.pause_until() is not None:  # starting by hand ends a pause
+                self.resume(quiet=True)
+            systemctl("--no-block", "start", SERVICE)
         self.refresh()
+        self.refresh_soon()
 
     def on_restart(self, *_):
-        systemctl("restart", SERVICE)
+        restart_daemon()
         notify("Daemon restarted.")
         self.refresh()
 
@@ -951,7 +1189,7 @@ class Tray:
         games = self.config.setdefault("games", {})
         games.setdefault(proc, {})["enabled"] = item.get_active()
         write_config(self.config)
-        systemctl("restart", SERVICE)
+        restart_daemon()
         name = self.app_items.get(proc, (None, proc))[1]
         notify(f"{name} {'enabled' if item.get_active() else 'disabled'}.")
         self.refresh()
@@ -962,7 +1200,7 @@ class Tray:
         for proc, _label, _game, _custom in self.catalog():
             games.setdefault(proc, {})["enabled"] = value
         write_config(self.config)
-        systemctl("restart", SERVICE)
+        restart_daemon()
         notify("All apps " + ("enabled." if value else "disabled."))
         self.refresh()
 
@@ -985,7 +1223,7 @@ class Tray:
                                     f"{found['client_id']}/{found['icon']}.png")
         games[found["process"]] = entry
         write_config(self.config)
-        systemctl("restart", SERVICE)
+        restart_daemon()
         notify(f"{found['name']} added.")
         self.suggestions = [s for s in self.suggestions
                             if s["client_id"] != found["client_id"]]
@@ -996,7 +1234,7 @@ class Tray:
         self.config = read_config()
         (self.config.get("games") or {}).pop(proc, None)
         write_config(self.config)
-        systemctl("restart", SERVICE)
+        restart_daemon()
         notify("App removed.")
         self.rebuild_menu()
         self.refresh()
@@ -1078,9 +1316,7 @@ class Tray:
         entries = self.catalog()
         known_ids = {game.get("client_id") for _p, _l, game, _c in entries}
         known_keys = {proc for proc, _l, _g, _c in entries}
-        if force:
-            detectable_apps(force=True)
-        found = suggest_apps(self.daemon, known_ids, known_keys)
+        found = suggest_apps(self.daemon, known_ids, known_keys, refresh=force)
         GLib.idle_add(self.show_suggestions, found)
 
     def show_suggestions(self, found):
@@ -1089,52 +1325,89 @@ class Tray:
         self.refresh()
         return False
 
+    def games_snapshot(self):
+        """The app settings the menu was drawn from, to notice hand edits."""
+        return json.dumps(self.config.get("games"), sort_keys=True, default=str)
+
     def refresh(self):
-        """Repaint status from systemd, then scan for running apps off-thread."""
+        """Repaint status from systemd and from what the daemon says it is
+        showing; only scan for open apps when the daemon cannot tell."""
         self.config = read_config()
         active = service_active()
+        paused = self.pause_until()
+        if paused is None and "pause" in self.config:  # it ran out by itself
+            self.config.pop("pause")
+            write_config(self.config)
+        if ((paused is not None) != self.menu_paused
+                or self.games_snapshot() != self.menu_games):  # edited by hand
+            self.rebuild_menu()
 
         self.updating = True
-        self.status_item.set_label("Daemon: running" if active else "Daemon: stopped")
+        if not active:
+            status = "Daemon: stopped"
+        elif paused is None:
+            status = "Daemon: running"
+        elif paused:
+            status = time.strftime("Daemon: paused until %H:%M", time.localtime(paused))
+        else:
+            status = "Daemon: paused until you resume"
+        self.status_item.set_label(status)
         self.toggle_item.set_label("Stop daemon" if active else "Start daemon")
         self.boot_item.set_active(service_enabled())
         self.login_item.set_active(
             systemctl("is-enabled", TRAY_SERVICE).stdout.strip() == "enabled")
         games = self.builtin_games()
-        for proc, (item, label) in getattr(self, "app_items", {}).items():
+        for proc, (item, _label) in getattr(self, "app_items", {}).items():
             item.set_active(self.app_enabled(proc, games.get(proc, {})))
-            mark = "  •  detected" if proc in self.detected else ""
-            item.set_label(f"{label}{mark}")
         self.updating = False
 
         self.apply_icon(active)
-        threading.Thread(target=self.scan, daemon=True).start()
+        reported = daemon_status(self.daemon) if active else None
+        if reported is not None:
+            self.show_detected(set(reported["showing"]), active, paused, True)
+        elif not self.scanning:
+            self.scanning = True
+            threading.Thread(target=self.scan, args=(active, paused), daemon=True).start()
         return True  # keep the timer alive
 
-    def scan(self):
-        """Which enabled apps are open right now (pgrep/MPRIS, so off the UI)."""
-        found = set()
-        if self.daemon:
-            for proc, _label, entry, _custom in self.catalog():
-                if not self.app_enabled(proc, entry):
-                    continue
-                try:
-                    if hasattr(self.daemon, "is_running"):
-                        hit = self.daemon.is_running(proc, entry)
-                    else:  # a 1.1 daemon next to a newer tray
-                        hit = self.daemon.running(entry.get("running", proc))
-                    if hit:
-                        found.add(proc)
-                except Exception:
-                    pass  # a detector may fail on its own; never take the tray down
-        GLib.idle_add(self.show_detected, found)
+    def refresh_soon(self, seconds=2):
+        """One more repaint once a non-blocking start/stop has settled."""
+        GLib.timeout_add_seconds(seconds, lambda: self.refresh() and False)
 
-    def show_detected(self, found):
-        self.detected = found
-        names = sorted(label for proc, (item, label) in self.app_items.items()
-                       if proc in found)
+    def scan(self, active, paused):
+        """Which enabled apps are open right now (pgrep/MPRIS, so off the UI).
+        Only for a daemon that is stopped or too old to report."""
+        found = set()
+        try:
+            if self.daemon:
+                for proc, _label, entry, _custom in self.catalog():
+                    if not self.app_enabled(proc, entry):
+                        continue
+                    try:
+                        if hasattr(self.daemon, "is_running"):
+                            hit = self.daemon.is_running(proc, entry)
+                        else:  # a 1.1 daemon next to a newer tray
+                            hit = self.daemon.running(entry.get("running", proc))
+                        if hit:
+                            found.add(proc)
+                    except Exception:
+                        pass  # a detector may fail on its own; never take the tray down
+        finally:
+            GLib.idle_add(self.show_detected, found, active, paused, False)
+
+    def show_detected(self, found, active, paused, published):
+        self.scanning = self.scanning and published
+        self.detected, self.published = found, published
+        mark = "  •  showing" if published else "  •  open"
+        for proc, (item, label) in self.app_items.items():
+            item.set_label(f"{label}{mark if proc in found else ''}")
+        labels = {proc: label for proc, (_item, label) in self.app_items.items()}
+        names = sorted(labels.get(proc, proc) for proc in found)
         listed = ", ".join(names) if names else "nothing"
-        if service_active():
+        if active and paused is not None:
+            self.showing_item.set_label("Nothing is shown while paused")
+            self.indicator.set_title("Discord Presence — paused")
+        elif active:
             self.showing_item.set_label(f"Showing now: {listed}")
             self.indicator.set_title(f"Discord Presence — {listed}")
         else:  # open apps are not being published while the daemon is stopped

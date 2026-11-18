@@ -6,7 +6,10 @@ publica: um jogo "Wine" falso (argv[0] no formato Windows), iscas que so
 carregam o nome do jogo nos argumentos, um socket velho na frente do bom, o
 tempo de jogo contado desde que o processo nasceu, um Discord antigo que
 recusa os campos de 2025 (status_display_type, links), e a presenca apagada
-quando o jogo fecha e quando o daemon e encerrado.
+quando o jogo fecha e quando o daemon e encerrado. Depois, o arquivo de estado
+que a bandeja le, uma pausa que segura a presenca ate acabar, o nivel
+"minimal", que publica so o nome do app, e o SIGHUP da bandeja, que troca
+opcoes sem reconectar e encerra uma pausa na hora.
 
 Feito para rodar isolado, sem ver o Discord de verdade nem a rede:
 
@@ -47,6 +50,7 @@ class FakeDiscord:
     def __init__(self, path):
         self.events = []  # (hora, client_id, activity)
         self.refused = []  # atividades com campos que este Discord nao conhece
+        self.handshakes = []  # (hora, client_id): cada conexao nova
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(path)
@@ -80,6 +84,8 @@ class FakeDiscord:
                 body = json.loads(self.recv(conn, length))
                 if op == 0:
                     client = body["client_id"]
+                    with self.lock:
+                        self.handshakes.append((time.time(), client))
                     self.reply(conn, 1, {"cmd": "DISPATCH", "evt": "READY", "nonce": None,
                                          "data": {"v": 1}})
                 elif op == 1:
@@ -156,6 +162,7 @@ def main():
     game = spawn(EXE, "sleep", "120")
     time.sleep(3)  # o jogo ja estava aberto quando o daemon sobe
 
+    status = run / "discord-game-presence" / "status.json"
     env = dict(os.environ, XDG_RUNTIME_DIR=str(run), XDG_CONFIG_HOME=str(config),
                PYTHONUNBUFFERED="1")
     env.pop("DBUS_SESSION_BUS_ADDRESS", None)
@@ -173,6 +180,12 @@ def main():
                   f"{start - daemon_started:+.1f}s do daemon")
             check("texto publicado", shown[2].get("details") == "Jogo Falso"
                   and shown[2].get("state") == "Jogando")
+            try:
+                showing = json.loads(status.read_text())["showing"]
+            except (OSError, ValueError, KeyError):
+                showing = {}
+            check("arquivo de estado diz o que esta publicado",
+                  showing.get("fakegame.exe", {}).get("name") == "Jogo Falso", str(showing))
             check("Discord antigo recusou os campos novos e saiu a versao sem eles",
                   bool(discord.refused) and not any(k in shown[2] for k in NEW_FIELDS),
                   f"{len(discord.refused)} recusa(s)")
@@ -206,13 +219,80 @@ def main():
         cleared = discord.wait(lambda e: e[1] == CLIENT and e[2] is None and e[0] >= mark, 2)
         check("SIGTERM apaga a presenca e sai com 0", bool(cleared) and code == 0,
               f"saida {code}")
+        try:
+            final = json.loads(status.read_text())
+        except (OSError, ValueError):
+            final = {}
+        check("SIGTERM deixa o estado vazio e marcado como parado",
+              final.get("stopped") is True and final.get("showing") == {}, str(final))
+        logs = [daemon.stdout.read()]
+
+        # pausa de 4 s, pedida pela bandeja, com o jogo aberto; e so o nome do app
+        games["fakegame.exe"]["detail"] = "minimal"
+        (config / "discord-game-presence.json").write_text(json.dumps(
+            {"games": games, "pause": {"until": time.time() + 4}}))
+        mark = time.time()
+        daemon = subprocess.Popen([sys.executable, "-I", str(DAEMON)], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        early = discord.wait(lambda e: e[1] == CLIENT and e[2] and e[0] > mark, 3)
+        check("nada publicado durante a pausa", early is None)
+        with discord.lock:
+            clears = [e for e in discord.events if e[0] > mark and e[2] is None]
+        check("depois de sair limpo, o novo daemon nao reconecta so para apagar",
+              not clears, f"{len(clears)} conexao(oes) de limpeza")
+        try:
+            paused = json.loads(status.read_text()).get("paused")
+        except (OSError, ValueError):
+            paused = None
+        check("arquivo de estado mostra a pausa", paused is True, str(paused))
+        late = discord.wait(lambda e: e[1] == CLIENT and e[2] and e[0] > mark, 12)
+        check("publicou sozinho quando a pausa acabou",
+              bool(late) and late[0] - mark >= 3.5,
+              f"{late[0] - mark:.1f}s depois" if late else "nao publicou")
+        if late:
+            check('"minimal" publica so o nome do app',
+                  late[2].get("details") == "Jogo Falso" and "state" not in late[2]
+                  and late[2]["timestamps"].get("start", 0) <= late[0], str(late[2]))
+
+        # opcoes trocadas pela bandeja: SIGHUP, sem reiniciar nem reconectar
+        games["fakegame.exe"].pop("detail")
+        (config / "discord-game-presence.json").write_text(json.dumps({"games": games}))
+        mark = time.time()
+        daemon.send_signal(signal.SIGHUP)
+        full = discord.wait(lambda e: e[1] == CLIENT and e[2] and e[0] > mark
+                            and e[2].get("state") == "Jogando", 6)
+        with discord.lock:
+            new = [h for h in discord.handshakes if h[0] > mark]
+        check("SIGHUP aplica as opcoes na mesma conexao",
+              bool(full) and not new and daemon.poll() is None,
+              (f"{full[0] - mark:.1f}s, " if full else "nao republicou, ")
+              + f"{len(new)} conexao(oes) nova(s)")
+        daemon.send_signal(signal.SIGTERM)
+        logs.append(daemon.stdout.read())
+        daemon.wait(timeout=10)
+
+        # pausa "ate eu retomar": a bandeja tira a pausa e acorda o daemon
+        (config / "discord-game-presence.json").write_text(json.dumps(
+            {"games": games, "pause": {"until": None}}))
+        daemon = subprocess.Popen([sys.executable, "-I", str(DAEMON)], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.5)
+        (config / "discord-game-presence.json").write_text(json.dumps({"games": games}))
+        mark = time.time()
+        daemon.send_signal(signal.SIGHUP)
+        back = discord.wait(lambda e: e[1] == CLIENT and e[2] and e[0] > mark, 10)
+        check("retomar com SIGHUP publica na hora, sem esperar a conferencia",
+              bool(back) and back[0] - mark < 3,
+              f"{back[0] - mark:.1f}s" if back else "nao publicou")
+        daemon.send_signal(signal.SIGTERM)
+        daemon.wait(timeout=10)
     finally:
         if daemon.poll() is None:
             daemon.kill()
         for proc in decoys + [game]:
             proc.kill()
         out = daemon.stdout.read() if daemon.stdout else ""
-        print("\n--- log do daemon\n" + out.strip())
+        print("\n--- log do daemon\n" + "\n".join(locals().get("logs", []) + [out]).strip())
     sys.exit(0 if all(results) else 1)
 
 

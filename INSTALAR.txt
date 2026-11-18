@@ -176,15 +176,24 @@ Instalar:
 
 O que o menu oferece (tudo em ingles):
 
-  Daemon: running/stopped .... estado do servico
-  Showing now: ................ o que esta sendo publicado agora
+  Daemon: running/stopped .... estado do servico (ou "paused until 15:30")
+  Showing now: ................ o que o Discord recebeu, dito pelo daemon
   Update to X ................. aparece quando sai versao nova
+  Pause presence .............. 15 min, 1 h, 4 h ou ate retomar; apaga
+                                tudo do perfil ate la (vale apos reboot)
+  Resume presence ............. aparece durante a pausa e volta na hora
   Apps Discord can see ........ liga/desliga cada app do catalogo
      Add a running app ........ varre os processos abertos, cruza com a
                                 base de jogos do Discord e adiciona o que
                                 reconhecer, com o Application ID certo
      Remove an app I added .... remove o que voce adicionou
      Enable all / Disable all . tudo de uma vez
+  Presence details ............ um submenu por app:
+     Everything / Title and cover, nothing clickable / Only the app name
+     Cover image, Links in the text, Buttons, Timer and progress bar
+     (midia) Keep showing while paused, Hide paused media after N min,
+     Show ads as "Ad", Show browsing, Show what I search
+     Back to the defaults
   Appearance
      Icon shape ............... Blob, Controller, Broadcast, Bolt, Chat,
                                 Headset, Rocket, Ghost, Dot
@@ -248,7 +257,12 @@ Regras da sobreposicao:
   - client_id vazio ("")               -> desliga aquela entrada
 
 Ou seja: para customizar, voce nunca precisa editar o Python. Cria o
-JSON, reinicia o servico e pronto.
+JSON, reinicia o servico e pronto. So as opcoes de exibicao (detail,
+show_*, pause_minutes, browse_minutes, status_display) dispensam o
+restart:
+    systemctl --user reload discord-game-presence
+rele essas opcoes sem reconectar, e a presenca nao some do perfil. A
+bandeja ja faz isso sozinha quando voce mexe em Presence details.
 
 Como o daemon acha o app: ele roda, por baixo, o equivalente a
 
@@ -557,7 +571,11 @@ Botoes de link nao aparecem:
 
 Presenca de video/musica nao sai depois que parei de assistir:
     - uma aba pausada continua sendo um player enquanto existir. Depois de
-      5 minutos parada a presenca sai sozinha; dando play, volta.
+      5 minutos parada a presenca sai sozinha; dando play, volta. Para
+      mudar: bandeja > Presence details > o app > Hide paused media after,
+      ou no JSON {"games": {"youtube": {"pause_minutes": 1}}}.
+      "show_paused": false tira na hora. Pela bandeja vale no ato; no
+      JSON, depois de systemctl --user reload discord-game-presence.
 
 Video/musica sem barra de tempo (so a duracao ao lado do nome):
     - o Firefox so informa a posicao em rajadas, logo depois de um seek
