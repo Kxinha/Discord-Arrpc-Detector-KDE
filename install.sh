@@ -8,6 +8,7 @@
 #   SKIP_VESKTOP=1      nao instala o Vesktop (ja usa outro cliente com IPC)
 #   SKIP_TRAY=1         nao liga o icone de bandeja
 #   DGP_VERSION=1.4.0   instala essa versao em vez da ultima release
+#   DGP_MIRROR=gitlab   baixa a release do espelho no GitLab
 #   REPO_RAW=<url raw>  pega o codigo de uma branch, sem release nem sha256
 #
 # Pela internet, os arquivos vem da ultima release do GitHub e so sao
@@ -20,12 +21,15 @@
 set -euo pipefail
 
 REPO="gabrielmf1998/Discord-Arrpc-Detector-KDE"
+GITLAB="https://gitlab.com/gabriel17166/arrpc-personalizado-pessoal-linux"
 DGP_VERSION="${DGP_VERSION:-latest}"
-if [ "$DGP_VERSION" = latest ]; then
-    RELEASE_URL="https://github.com/$REPO/releases/latest/download"
-else
-    RELEASE_URL="https://github.com/$REPO/releases/download/v${DGP_VERSION#v}"
-fi
+DGP_MIRROR="${DGP_MIRROR:-github}"
+case "$DGP_MIRROR:$DGP_VERSION" in
+    gitlab:latest) RELEASE_URL="$GITLAB/-/releases/permalink/latest/downloads" ;;
+    gitlab:*)      RELEASE_URL="$GITLAB/-/releases/v${DGP_VERSION#v}/downloads" ;;
+    *:latest)      RELEASE_URL="https://github.com/$REPO/releases/latest/download" ;;
+    *)             RELEASE_URL="https://github.com/$REPO/releases/download/v${DGP_VERSION#v}" ;;
+esac
 RELEASE_URL="${DGP_RELEASE_URL:-$RELEASE_URL}"
 REPO_RAW="${REPO_RAW:-}"
 # token so e preciso se o repositorio voltar a ser privado
@@ -195,7 +199,7 @@ gather_files() {
         for f in "${SCRIPTS[@]}"; do fetch "$REPO_RAW/$f" "$dest/$f" || die "falhou baixar $f"; done
         for f in "${UNITS[@]}"; do fetch "$REPO_RAW/systemd/$f" "$dest/$f" || die "falhou baixar $f"; done
     else
-        msg "baixando a release ($DGP_VERSION) do GitHub"
+        msg "baixando a release ($DGP_VERSION) de $RELEASE_URL"
         for f in "${SCRIPTS[@]}" "${UNITS[@]}" SHA256SUMS; do
             fetch "$RELEASE_URL/$f" "$dest/$f" || die "falhou baixar $f de $RELEASE_URL"
         done

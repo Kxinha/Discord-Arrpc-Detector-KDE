@@ -99,6 +99,12 @@ curl -fsSL "$URL" | SKIP_TRAY=1 bash          # sem o ícone de bandeja
 curl -fsSL "$URL" | DGP_VERSION=1.4.0 bash    # uma versão específica
 ```
 
+Tudo pelo espelho no GitLab, script e release:
+
+```bash
+curl -fsSL https://gitlab.com/gabriel17166/arrpc-personalizado-pessoal-linux/-/raw/main/install.sh | DGP_MIRROR=gitlab bash
+```
+
 O instalador:
 
 1. detecta a distro (Arch, Debian/Ubuntu, Fedora, openSUSE, ou genérica);
@@ -120,8 +126,7 @@ reiniciam com a nova. Depois da primeira instalação, a própria bandeja avisa
 das próximas versões (menu **Updates**).
 
 Prefere clonar: `git clone` + `./install.sh` faz o mesmo com os arquivos do
-clone. Espelho no GitLab:
-`git clone https://gitlab.com/gabriel17166/arrpc-personalizado-pessoal-linux.git`.
+clone, do GitHub ou do GitLab.
 Passo a passo manual, sem script: [`INSTALAR.txt`](INSTALAR.txt).
 
 ### Por que Vesktop nativo
