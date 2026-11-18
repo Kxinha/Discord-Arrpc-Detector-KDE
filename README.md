@@ -82,23 +82,46 @@ usa. Ele aceita `./DiscordPresence-*.AppImage daemon` para rodar só o daemon e
 
 ### Script (instala também o Vesktop)
 
+Qualquer distro com systemd. Rode como usuário normal; o `sudo` só aparece se
+faltar alguma dependência ou o Vesktop.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/main/install.sh | bash
+```
+
+As opções vão **depois do pipe**, no `bash` (antes do `curl` elas não chegam
+ao instalador):
+
+```bash
+URL=https://raw.githubusercontent.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/main/install.sh
+curl -fsSL "$URL" | SKIP_VESKTOP=1 bash       # já usa outro cliente com o socket de IPC
+curl -fsSL "$URL" | SKIP_TRAY=1 bash          # sem o ícone de bandeja
+curl -fsSL "$URL" | DGP_VERSION=1.4.0 bash    # uma versão específica
 ```
 
 O instalador:
 
 1. detecta a distro (Arch, Debian/Ubuntu, Fedora, openSUSE, ou genérica);
-2. instala as dependências (`python3`, `iproute2`/`ss`, `curl`);
-3. instala o **Vesktop nativo** — pacote do repositório no Arch, `.deb`/`.rpm`
-   oficial nas demais, tarball em `/opt` como reserva;
-4. instala o daemon em `~/.local/bin` e o serviço em `~/.config/systemd/user`,
-   já habilitado;
+2. instala só as dependências que faltarem (`python3`, `iproute2`/`ss`,
+   `curl`, PyGObject, GTK3, AppIndicator, librsvg); com tudo presente, nem
+   pede senha;
+3. instala o **Vesktop nativo** se ele ainda não existir: `.deb`/`.rpm`
+   oficial do Vesktop no Debian, Fedora e openSUSE, pacote dos repositórios
+   oficiais no Arch quando houver, e o tarball oficial em `/opt` nos demais
+   casos (o AUR nunca é usado);
+4. baixa o daemon, a bandeja e as duas units da **última release**, confere o
+   sha256 de cada um com o `SHA256SUMS` dela e só então instala em
+   `~/.local/bin` e `~/.config/systemd/user`, com os dois serviços ligados;
 5. liga o log de console do L4D2, necessário para saber o mapa.
 
-Já usa outro cliente que exponha o socket de IPC? `SKIP_VESKTOP=1 curl ... | bash`.
+Rodar o mesmo comando de novo **atualiza**: a versão anterior fica em
+`~/.local/share/discord-game-presence/backup/<versão>/` e daemon e bandeja
+reiniciam com a nova. Depois da primeira instalação, a própria bandeja avisa
+das próximas versões (menu **Updates**).
 
-Prefere clonar: `git clone` + `./install.sh` faz o mesmo.
+Prefere clonar: `git clone` + `./install.sh` faz o mesmo com os arquivos do
+clone. Espelho no GitLab:
+`git clone https://gitlab.com/gabriel17166/arrpc-personalizado-pessoal-linux.git`.
 Passo a passo manual, sem script: [`INSTALAR.txt`](INSTALAR.txt).
 
 ### Por que Vesktop nativo
@@ -589,6 +612,7 @@ tests/test_detection.py                    testes (python3 -m unittest discover 
 tests/test_options.py                      níveis de detalhe, pausa, arquivo de estado, sugestões
 tests/test_update.py                       atualização contra um GitHub falso
 tests/e2e_fake_discord.py                  ponta a ponta com um Discord falso, isolado em bwrap
+tests/e2e_install.sh                       o instalador via curl | bash contra uma release local
 systemd/*.service                          units para instalação por usuário
 packaging/build.sh                         gera .rpm, .deb, .pkg.tar.zst e .AppImage
 packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /usr
@@ -601,12 +625,21 @@ python3 -m unittest discover -s tests          # regras, YouTube, abas do Chrome
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
       --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
       python3 tests/e2e_fake_discord.py        # o daemon inteiro contra um Discord falso
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
+      --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
+      bash tests/e2e_install.sh                # o instalador, como curl | bash
 ```
 
 O segundo roda o daemon de verdade contra um socket de IPC falso, sem ver o
 Discord real nem a rede, e confere a detecção, o tempo de jogo, a volta para a
 presença sem links quando o Discord recusa os campos novos, a presença
-apagada ao fechar, o arquivo de estado, a pausa e o nível `minimal`.
+apagada ao fechar, o arquivo de estado, a pausa, o nível `minimal` e o
+`SIGHUP`, que troca as opções sem reconectar.
+
+O terceiro passa o `install.sh` pelo pipe, como o `curl`, contra uma release
+servida localmente, com `HOME` temporário e `systemctl`/`sudo` de mentira:
+sha256 conferido, reinício dos serviços, nenhum `sudo` com as dependências
+presentes, backup ao reinstalar e recusa de uma release adulterada.
 
 ### Gerar os pacotes
 

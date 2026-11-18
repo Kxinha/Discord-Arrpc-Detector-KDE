@@ -2,13 +2,32 @@
 # Instalador do discord-game-presence: Vesktop nativo, daemon de Rich Presence
 # e o icone de bandeja que controla tudo.
 #
-#   curl -fsSL <URL_RAW>/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/main/install.sh | bash
+#
+# Opcoes, sempre do lado do bash:  curl ... | SKIP_VESKTOP=1 bash
+#   SKIP_VESKTOP=1      nao instala o Vesktop (ja usa outro cliente com IPC)
+#   SKIP_TRAY=1         nao liga o icone de bandeja
+#   DGP_VERSION=1.4.0   instala essa versao em vez da ultima release
+#   REPO_RAW=<url raw>  pega o codigo de uma branch, sem release nem sha256
+#
+# Pela internet, os arquivos vem da ultima release do GitHub e so sao
+# instalados se o sha256 bater com o SHA256SUMS dela. Rodado de um clone, usa
+# os arquivos do clone. Rodar de novo atualiza e reinicia o que ja estava
+# instalado, guardando a versao anterior.
 #
 # Suporta Arch, Debian/Ubuntu, Fedora, openSUSE e, como reserva, qualquer distro
 # com systemd (Vesktop vai para /opt a partir do tarball oficial).
 set -euo pipefail
 
-REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/main}"
+REPO="gabrielmf1998/Discord-Arrpc-Detector-KDE"
+DGP_VERSION="${DGP_VERSION:-latest}"
+if [ "$DGP_VERSION" = latest ]; then
+    RELEASE_URL="https://github.com/$REPO/releases/latest/download"
+else
+    RELEASE_URL="https://github.com/$REPO/releases/download/v${DGP_VERSION#v}"
+fi
+RELEASE_URL="${DGP_RELEASE_URL:-$RELEASE_URL}"
+REPO_RAW="${REPO_RAW:-}"
 # token so e preciso se o repositorio voltar a ser privado
 GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 BIN_DIR="$HOME/.local/bin"
@@ -43,9 +62,33 @@ detect_distro() {
     esac
 }
 
+# o que da lista ainda nao esta instalado: sem nada faltando, nem pede senha
+missing_pkgs() {
+    local distro="$1"; shift
+    case "$distro" in
+        arch)   pacman -T "$@" 2>/dev/null || true ;;
+        debian) local p
+                for p in "$@"; do
+                    dpkg-query -W -f='${Status}\n' "$p" 2>/dev/null \
+                        | grep -q "ok installed" || echo "$p"
+                done ;;
+        fedora|suse)
+                local p
+                for p in "$@"; do rpm -q --whatprovides "$p" >/dev/null 2>&1 || echo "$p"; done ;;
+        *)      printf '%s\n' "$@" ;;
+    esac
+}
+
 pkg_install() {
     local distro="$1"; shift
     [ $# -gt 0 ] || return 0
+    local missing
+    mapfile -t missing < <(missing_pkgs "$distro" "$@")
+    if [ ${#missing[@]} -eq 0 ]; then
+        msg "dependencias ja instaladas"
+        return 0
+    fi
+    set -- "${missing[@]}"
     msg "instalando dependencias: $*"
     case "$distro" in
         arch)   sudo pacman -S --needed --noconfirm "$@" ;;
@@ -92,11 +135,14 @@ install_vesktop() {
         return
     fi
     local api="https://api.github.com/repos/Vencord/Vesktop/releases/latest"
-    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    local tmp="$WORK/vesktop"; mkdir -p "$tmp"
 
     case "$distro" in
         arch)
-            sudo pacman -S --needed --noconfirm vesktop && return
+            # so os repositorios oficiais; sem pacote la, vai o tarball (nada de AUR)
+            if pacman -Si vesktop >/dev/null 2>&1; then
+                sudo pacman -S --needed --noconfirm vesktop && return
+            fi
             ;;
         debian)
             local url; url=$(curl -fsSL "$api" | grep -o 'https://[^"]*amd64\.deb' | head -1)
@@ -128,32 +174,72 @@ install_vesktop() {
 }
 
 # ------------------------------------------------------------ daemon + tray
+SCRIPTS=(discord-game-presence.py discord-presence-tray.py)
+UNITS=(discord-game-presence.service discord-game-presence-tray.service)
+
+# Junta os quatro arquivos em $1: do clone, de uma branch ou da release.
+gather_files() {
+    local dest="$1" here="" f
+    # "curl | bash" nao tem arquivo de script; "bash install.sh" no clone tem
+    # (com o script vindo do pipe, BASH_SOURCE e so "bash", que nao e este arquivo)
+    local src="${BASH_SOURCE[0]:-}"
+    if [ -f "$src" ] && grep -q '^gather_files()' "$src" 2>/dev/null; then
+        here="$(cd "$(dirname "$src")" && pwd)"
+    fi
+    if [ -n "$here" ] && [ -f "$here/discord-game-presence.py" ]; then
+        msg "usando os arquivos do clone em $here"
+        cp "$here/${SCRIPTS[0]}" "$here/${SCRIPTS[1]}" "$dest/"
+        cp "$here/systemd/${UNITS[0]}" "$here/systemd/${UNITS[1]}" "$dest/"
+    elif [ -n "$REPO_RAW" ]; then
+        msg "baixando de $REPO_RAW (sem conferir sha256)"
+        for f in "${SCRIPTS[@]}"; do fetch "$REPO_RAW/$f" "$dest/$f" || die "falhou baixar $f"; done
+        for f in "${UNITS[@]}"; do fetch "$REPO_RAW/systemd/$f" "$dest/$f" || die "falhou baixar $f"; done
+    else
+        msg "baixando a release ($DGP_VERSION) do GitHub"
+        for f in "${SCRIPTS[@]}" "${UNITS[@]}" SHA256SUMS; do
+            fetch "$RELEASE_URL/$f" "$dest/$f" || die "falhou baixar $f de $RELEASE_URL"
+        done
+        for f in "${SCRIPTS[@]}" "${UNITS[@]}"; do
+            grep -q "  $f\$" "$dest/SHA256SUMS" || die "$f nao esta no SHA256SUMS da release"
+        done
+        ( cd "$dest" && sha256sum --quiet --ignore-missing -c SHA256SUMS ) \
+            || die "sha256 nao confere: nada foi instalado"
+        msg "sha256 conferido"
+    fi
+    python3 "$dest/${SCRIPTS[0]}" --version >/dev/null 2>&1 \
+        || die "o daemon baixado nao roda com este python3"
+}
+
+# A versao anterior vai para o mesmo lugar que a atualizacao pela bandeja usa.
+backup_old() {
+    local old="$BIN_DIR/${SCRIPTS[0]}" version f
+    [ -f "$old" ] || return 0
+    version="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$old")"
+    local dir="$HOME/.local/share/discord-game-presence/backup/${version:-anterior}"
+    mkdir -p "$dir"
+    for f in "${SCRIPTS[@]}"; do [ -f "$BIN_DIR/$f" ] && cp -p "$BIN_DIR/$f" "$dir/"; done
+    for f in "${UNITS[@]}"; do [ -f "$UNIT_DIR/$f" ] && cp -p "$UNIT_DIR/$f" "$dir/"; done
+    msg "versao anterior (${version:-?}) guardada em $dir"
+}
+
 install_daemon() {
     mkdir -p "$BIN_DIR" "$UNIT_DIR"
-    local here; here="$(dirname "$0")"
+    local tmp="$WORK/files"; mkdir -p "$tmp"
+    gather_files "$tmp"
+    backup_old
+    install -m 755 "$tmp/${SCRIPTS[0]}" "$tmp/${SCRIPTS[1]}" "$BIN_DIR/"
+    install -m 644 "$tmp/${UNITS[0]}" "$tmp/${UNITS[1]}" "$UNIT_DIR/"
+    msg "instalado: $(python3 "$BIN_DIR/${SCRIPTS[0]}" --version) em $BIN_DIR"
 
-    if [ -f "$here/discord-game-presence.py" ]; then
-        install -m 755 "$here/discord-game-presence.py" "$BIN_DIR/discord-game-presence.py"
-        install -m 755 "$here/discord-presence-tray.py" "$BIN_DIR/discord-presence-tray.py"
-        install -m 644 "$here/systemd/discord-game-presence.service" "$UNIT_DIR/"
-        install -m 644 "$here/systemd/discord-game-presence-tray.service" "$UNIT_DIR/"
-    else  # instalacao via curl | bash: baixa do repositorio
-        fetch "$REPO_RAW/discord-game-presence.py" "$BIN_DIR/discord-game-presence.py" \
-            || die "falhou baixar o daemon"
-        fetch "$REPO_RAW/discord-presence-tray.py" "$BIN_DIR/discord-presence-tray.py" \
-            || die "falhou baixar o tray"
-        chmod 755 "$BIN_DIR/discord-game-presence.py" "$BIN_DIR/discord-presence-tray.py"
-        for unit in discord-game-presence.service discord-game-presence-tray.service; do
-            fetch "$REPO_RAW/systemd/$unit" "$UNIT_DIR/$unit" || die "falhou baixar $unit"
-        done
-    fi
-
+    # restart, e nao so --now: rodar de novo tem de trocar o que ja estava rodando
     systemctl --user daemon-reload
-    systemctl --user enable --now discord-game-presence.service
+    systemctl --user enable discord-game-presence.service
+    systemctl --user restart discord-game-presence.service
     if [ "$SKIP_TRAY" = 1 ]; then
         msg "tray nao habilitado (SKIP_TRAY=1)"
     else
-        systemctl --user enable --now discord-game-presence-tray.service \
+        systemctl --user enable discord-game-presence-tray.service
+        systemctl --user restart discord-game-presence-tray.service \
             || warn "o tray nao subiu agora; ele inicia junto com a sessao grafica"
     fi
 }
@@ -176,6 +262,10 @@ setup_l4d2() {
 }
 
 main() {
+    # um trap RETURN dentro das funcoes continuava armado e, com set -u,
+    # derrubava o fim do script; uma pasta so, apagada na saida, resolve
+    WORK="$(mktemp -d)"
+    trap 'rm -rf "$WORK"' EXIT
     local distro; distro="$(detect_distro)"
     msg "distro detectada: $distro"
     install_deps "$distro"
@@ -197,6 +287,10 @@ Proximos passos:
 
   * Reinicie o daemon apos editar:
       systemctl --user restart discord-game-presence
+    (so opcoes de exibicao: systemctl --user reload discord-game-presence)
+
+  * Para atualizar, rode o mesmo comando de novo, ou use o item Updates
+    do icone de bandeja.
 EOF
 }
 

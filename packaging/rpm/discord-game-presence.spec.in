@@ -1,3 +1,6 @@
+# Fedora define _userunitdir no systemd-rpm-macros; fora dele, o caminho padrao
+%{!?_userunitdir:%global _userunitdir %{_prefix}/lib/systemd/user}
+
 Name:           discord-game-presence
 Version:        @VERSION@
 Release:        @RELEASE@%{?dist}
