@@ -400,5 +400,258 @@ class Minecraft(unittest.TestCase):
         self.assertIsNone(dgp.mc_proc())
 
 
+# ---------------------------------------------------------------- Chrome
+def snss(*commands):
+    """Arquivo de sessao SNSS v3 montado na mao, no formato do Chromium."""
+    data = struct.pack("<ii", 0x53534E53, 3)
+    for command, body in commands:
+        data += struct.pack("<HB", len(body) + 1, command) + body
+    return data
+
+
+def pickle_str(text, wide=False):
+    raw = text.encode("utf-16-le" if wide else "utf-8")
+    count = len(raw) // 2 if wide else len(raw)
+    return struct.pack("<i", count) + raw + b"\0" * (-len(raw) % 4)
+
+
+def navigation(tab, index, url, title):
+    body = struct.pack("<ii", tab, index) + pickle_str(url) + pickle_str(title, True)
+    body += pickle_str("") + struct.pack("<ii", 0, 0)  # page state, transicao, tipo
+    return 6, struct.pack("<I", len(body)) + body
+
+
+def pair(command, a, b):
+    return command, struct.pack("<ii", a, b)
+
+
+class ChromeSession(unittest.TestCase):
+    def test_tabs_selected_closed_and_pruned(self):
+        data = snss(
+            pair(0, 1, 10), pair(2, 10, 0),
+            navigation(10, 0, "https://www.youtube.com/watch?v=AAAAAAAAAAA", "Vídeo 🎄 - YouTube"),
+            pair(7, 10, 0),
+            pair(0, 1, 11), pair(2, 11, 1),
+            navigation(11, 0, "https://example.com/", "Outro"),
+            navigation(11, 1, "https://music.youtube.com/watch?v=BBBBBBBBBBB", "Faixa | YouTube Music"),
+            pair(7, 11, 1),
+            pair(11, 11, 1),              # a primeira navegacao saiu: a atual vira 0
+            pair(0, 1, 12), navigation(12, 0, "https://www.youtube.com/", "YouTube"),
+            (16, struct.pack("<iiq", 12, 0, 0)),  # aba 12 fechada
+            pair(8, 1, 1),                # selecionada: a da posicao 1
+        ) + struct.pack("<HB", 50, 6) + b"pela metade"
+        tabs = dgp.parse_session(data, "perfil")
+        self.assertEqual([(t.url[-11:], t.title, t.selected) for t in tabs], [
+            ("AAAAAAAAAAA", "Vídeo 🎄 - YouTube", False),
+            ("BBBBBBBBBBB", "Faixa | YouTube Music", True)])
+
+    def test_title_update_and_closed_window(self):
+        data = snss(pair(0, 1, 10), navigation(10, 0, "https://www.youtube.com/", "YouTube"),
+                    navigation(10, 0, "https://www.youtube.com/", "(2) YouTube"),
+                    pair(0, 2, 20), navigation(20, 0, "https://www.youtube.com/", "x"),
+                    (17, struct.pack("<iiq", 2, 0, 0)))
+        tabs = dgp.parse_session(data)
+        self.assertEqual([t.title for t in tabs], ["(2) YouTube"])
+
+    def test_other_versions_are_ignored(self):
+        self.assertEqual(dgp.parse_session(struct.pack("<ii", 0x53534E53, 5) + b"x" * 20), [])
+        self.assertEqual(dgp.parse_session(b"lixo"), [])
+
+
+Tab = dgp.Tab
+WATCH = "https://www.youtube.com/watch?v="
+SONG = "https://music.youtube.com/watch?v="
+
+
+class ChromePlayer(unittest.TestCase):
+    """Qual aba esta tocando, sem rede: o oEmbed vem de um dicionario."""
+
+    OEMBED = {
+        "AAAAAAAAAAA": {"title": "Video A", "author_name": "Canal A",
+                        "author_url": "https://www.youtube.com/@a"},
+        "SSSSSSSSSSS": {"title": "Rick Astley - Never Gonna Give You Up (Official Video)",
+                        "author_name": "Rick Astley"},
+        "TTTTTTTTTTT": {"title": "Rick Astley - Together Forever (Official Video)",
+                        "author_name": "Rick Astley"},
+    }
+
+    def setUp(self):
+        saved = {name: getattr(dgp, name) for name in
+                 ("youtube_oembed", "history_url", "browser_windows", "live_video_id")}
+        self.addCleanup(lambda: [setattr(dgp, k, v) for k, v in saved.items()])
+        dgp.youtube_oembed = lambda video: self.OEMBED.get(video, {})
+        dgp.history_url = lambda title, files=None: ""
+        dgp.browser_windows = lambda: []
+        dgp.live_video_id = lambda url: None
+        dgp._TRACK_TAB.clear()
+        dgp._MISMATCH.clear()
+
+    def play(self, title, artist, tabs, track="T1", windows=None, status="Playing"):
+        props = {"PlaybackStatus": status, "Metadata": {
+            "xesam:title": title, "xesam:artist": [artist], "mpris:trackid": track}}
+        return dgp.resolve_player("p", "chrome", props, tabs, windows)
+
+    def age(self, seconds):
+        title, _since = dgp._MISMATCH["p"]
+        dgp._MISMATCH["p"] = (title, time.monotonic() - seconds)
+
+    def test_tab_with_the_same_title(self):
+        tabs = [Tab(("x", 1), 1, 0, False, WATCH + "AAAAAAAAAAA", "(3) Video A - YouTube")]
+        media = self.play("Video A", "Canal A", tabs)
+        self.assertEqual((media["service"], media["video"], media["ad"]),
+                         ("youtube", "AAAAAAAAAAA", False))
+
+    def test_ad_on_a_known_tab(self):
+        tabs = [Tab(("x", 1), 1, 0, True, SONG + "SSSSSSSSSSS", "Never Gonna Give You Up | YouTube Music")]
+        self.assertFalse(self.play("Never Gonna Give You Up", "Rick Astley", tabs)["ad"])
+        media = self.play("Black Friday", "Loja Brasil", tabs)
+        self.assertTrue(media["pending"])  # pode ser a aba atrasada: espera
+        self.age(dgp.AD_CONFIRM + 1)
+        media = self.play("Black Friday", "Loja Brasil", tabs)
+        self.assertEqual((media["service"], media["ad"]), ("ytm", True))
+
+    def test_next_track_with_stale_tab_title(self):
+        old = [Tab(("x", 1), 1, 0, True, SONG + "SSSSSSSSSSS", "Never Gonna Give You Up | YouTube Music")]
+        self.play("Never Gonna Give You Up", "Rick Astley", old)
+        # o Chrome gravou a URL nova com o titulo da musica anterior
+        new = [Tab(("x", 1), 1, 0, True, SONG + "TTTTTTTTTTT&list=RD", old[0].title)]
+        media = self.play("Together Forever (2022 Remaster)", "Rick Astley", new)
+        self.assertEqual((media["video"], media["ad"], media["pending"]),
+                         ("TTTTTTTTTTT", False, False))
+
+    def test_same_artist_next_track_waits_for_the_new_url(self):
+        tabs = [Tab(("x", 1), 1, 0, True, SONG + "SSSSSSSSSSS", "Never Gonna Give You Up | YouTube Music")]
+        self.play("Never Gonna Give You Up", "Rick Astley", tabs)
+        # faixa nova do mesmo artista antes do Chrome gravar a URL nova
+        media = self.play("Together Forever (2022 Remaster)", "Rick Astley", tabs)
+        self.assertTrue(media["pending"])
+        new = [Tab(("x", 1), 1, 0, True, SONG + "TTTTTTTTTTT", tabs[0].title)]
+        media = self.play("Together Forever (2022 Remaster)", "Rick Astley", new)
+        self.assertEqual((media["video"], media["pending"]), ("TTTTTTTTTTT", False))
+
+    def test_long_music_video_ad_is_still_an_ad(self):
+        tabs = [Tab(("x", 1), 1, 0, True, SONG + "SSSSSSSSSSS", "Never Gonna Give You Up | YouTube Music")]
+        self.play("Never Gonna Give You Up", "Rick Astley", tabs)
+        self.play("Carona Pra Marte", "Israel Novaes", tabs)
+        self.age(180)
+        self.assertTrue(self.play("Carona Pra Marte", "Israel Novaes", tabs)["ad"])
+
+    def test_ad_before_the_first_video(self):
+        tabs = [Tab(("x", 1), 1, 0, True, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        windows = [("Video A - YouTube", False)]
+        self.assertTrue(self.play("Presenteie", "Marca", tabs, windows=windows)["pending"])
+        self.age(dgp.AD_CONFIRM + 1)
+        media = self.play("Presenteie", "Marca", tabs, windows=windows)
+        self.assertEqual((media["service"], media["ad"]), ("youtube", True))
+
+    def test_no_blame_without_a_single_visible_candidate(self):
+        tabs = [Tab(("x", 1), 1, 0, True, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        minimized = [("Video A - YouTube", True)]
+        self.assertIsNone(self.play("Outro site", "Alguem", tabs, windows=minimized)["service"])
+        two = tabs + [Tab(("x", 2), 2, 0, True, WATCH + "SSSSSSSSSSS", "B - YouTube")]
+        both = [("Video A - YouTube", False), ("B - YouTube", False)]
+        self.assertIsNone(self.play("Outro site", "Alguem", two, windows=both)["service"])
+
+    def test_other_browsers_and_firefox(self):
+        props = {"PlaybackStatus": "Playing", "Metadata": {
+            "xesam:title": "x", "xesam:url": WATCH + "AAAAAAAAAAA"}}
+        media = dgp.resolve_player("f", "firefox", props, [])
+        self.assertEqual((media["service"], media["source"]), ("youtube", "xesam:url"))
+        props["Metadata"].pop("xesam:url")
+        self.assertIsNone(dgp.resolve_player("v", "vlc", props, [])["service"])
+
+    def test_title_fits(self):
+        fits = dgp.title_fits
+        self.assertTrue(fits("Video A", "Canal A", "AAAAAAAAAAA", "youtube"))
+        self.assertFalse(fits("Video", "Canal A", "AAAAAAAAAAA", "youtube") is None)
+        self.assertTrue(fits("Never Gonna Give You Up", "Rick Astley", "SSSSSSSSSSS", "ytm"))
+        self.assertFalse(fits("Black Friday", "Loja", "SSSSSSSSSSS", "ytm"))
+        self.assertIsNone(fits("x", "y", "ZZZZZZZZZZZ", "ytm"))
+
+
+class ChromePresence(unittest.TestCase):
+    def setUp(self):
+        saved = {name: getattr(dgp, name) for name in
+                 ("youtube_oembed", "video_thumbnail", "mpris_position")}
+        self.addCleanup(lambda: [setattr(dgp, k, v) for k, v in saved.items()])
+        dgp.youtube_oembed = lambda video: {"title": "Lofi", "author_name": "Lofi Girl",
+                                            "author_url": "https://www.youtube.com/@LofiGirl"}
+        dgp.video_thumbnail = lambda video: f"https://i.ytimg.com/vi/{video}/hqdefault.jpg"
+        dgp.mpris_position = lambda player, tries=3: 10_000_000
+
+    def media(self, url, length, status="Playing", ad=False):
+        return {"player": "p", "url": url, "video": dgp.youtube_video_id(url) or "LLLLLLLLLLL",
+                "status": status, "ad": ad, "pending": False, "tab": None,
+                "meta": {"xesam:title": "Lofi", "xesam:artist": ["Lofi Girl"],
+                         "mpris:length": length}}
+
+    def test_live_has_no_end(self):
+        text, extra = dgp.video_state(self.media("https://www.youtube.com/@LofiGirl/live",
+                                                 9223372036854775807))
+        self.assertIn("Ao vivo", text)
+        self.assertNotIn("end", extra["timestamps"])
+        self.assertAlmostEqual(extra["timestamps"]["start"], time.time() - 10, delta=2)
+        self.assertIsNone(dgp.media_timestamps("x", 1, 9223372036854775807))
+
+    def test_video_card_links_and_bar(self):
+        text, extra = dgp.video_state(self.media(WATCH + "AAAAAAAAAAA", 60_000_000))
+        game = dgp.GAMES["youtube"]
+        act = dgp.build_activity(game, (text, extra), time.time())
+        self.assertEqual((act["type"], act["details"], act["state"]), (3, "Lofi", "Lofi Girl"))
+        self.assertEqual(act["details_url"], WATCH + "AAAAAAAAAAA")
+        self.assertEqual(act["state_url"], "https://www.youtube.com/@LofiGirl")
+        self.assertEqual(act["status_display_type"], 2)
+        self.assertEqual(act["timestamps"]["end"] - act["timestamps"]["start"], 60)
+        self.assertEqual(act["assets"]["small_image"], dgp.YT_ICON)
+        self.assertEqual([b["label"] for b in act["buttons"]], ["Assistir no YouTube", "Ver o canal"])
+
+    def test_paused_and_ad(self):
+        text, extra = dgp.video_state(self.media(WATCH + "AAAAAAAAAAA", 60_000_000, "Paused"))
+        self.assertEqual(text, "Lofi Girl · pausado em 0:10")
+        self.assertIsNone(extra["timestamps"])
+        text, extra = dgp.video_state(self.media(WATCH + "AAAAAAAAAAA", 15_000_000, ad=True))
+        self.assertEqual((text, extra["details"]), ("Anúncio", "Lofi"))
+
+    def test_shorts(self):
+        text, extra = dgp.video_state(self.media("https://www.youtube.com/shorts/AAAAAAAAAAA",
+                                                 30_000_000))
+        self.assertEqual(text, "Shorts · Lofi Girl")
+        self.assertEqual(extra["details_url"], "https://www.youtube.com/shorts/AAAAAAAAAAA")
+
+    def test_browsing_pages(self):
+        def page(url, title="YouTube"):
+            return Tab(("x", 1), 1, 0, True, url, title)
+        text = dgp.browse_text
+        self.assertEqual(text("youtube", page("https://www.youtube.com/"))[0], "Na página inicial")
+        search = page("https://www.youtube.com/results?search_query=segredo")
+        self.assertEqual(text("youtube", search)[0], "Pesquisando")
+        self.assertEqual(text("youtube", search, show_search=True)[0], "Pesquisando segredo")
+        channel = page("https://www.youtube.com/@BlenderOfficial")
+        self.assertEqual(text("youtube", channel, "Blender - YouTube")[0], "No canal Blender")
+        self.assertEqual(text("youtube", channel)[0], "Num canal")  # titulo velho da aba
+        self.assertEqual(text("ytm", page("https://music.youtube.com/library"))[0], "Na biblioteca")
+        self.assertEqual(dgp.caption_service("Faixa | YouTube Music"), "ytm")
+        self.assertEqual(dgp.caption_service("(2) Video - YouTube"), "youtube")
+        self.assertIsNone(dgp.caption_service("Agents"))
+
+    def test_new_fields_sanitized_and_legacy(self):
+        out = dgp.sanitize_activity({
+            "type": 4, "details": "d", "details_url": "https://ok", "state": "estado",
+            "state_url": "javascript:x", "status_display_type": 7,
+            "assets": {"large_image": "https://i/x.png", "large_url": "https://l",
+                       "small_image": "https://i/s.png", "small_text": "S!", "small_url": "ftp://x"}})
+        self.assertEqual(out["type"], 0)
+        self.assertNotIn("details_url", out)  # sem details (1 caractere) nao ha link
+        self.assertNotIn("state_url", out)
+        self.assertNotIn("status_display_type", out)
+        self.assertEqual(out["assets"], {"large_image": "https://i/x.png", "large_url": "https://l",
+                                         "small_image": "https://i/s.png", "small_text": "S!"})
+        rich = dgp.sanitize_activity({"type": 2, "details": "Faixa", "details_url": "https://a",
+                                      "status_display_type": 1,
+                                      "assets": {"large_image": "x", "large_url": "https://b"}})
+        self.assertEqual(dgp.legacy_activity(rich),
+                         {"type": 2, "details": "Faixa", "assets": {"large_image": "x"}})
+
+
 if __name__ == "__main__":
     unittest.main()

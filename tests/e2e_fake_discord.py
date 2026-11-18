@@ -4,7 +4,8 @@
 Roda o daemon de verdade contra um socket IPC de mentira e confere o que ele
 publica: um jogo "Wine" falso (argv[0] no formato Windows), iscas que so
 carregam o nome do jogo nos argumentos, um socket velho na frente do bom, o
-tempo de jogo contado desde que o processo nasceu, e a presenca apagada
+tempo de jogo contado desde que o processo nasceu, um Discord antigo que
+recusa os campos de 2025 (status_display_type, links), e a presenca apagada
 quando o jogo fecha e quando o daemon e encerrado.
 
 Feito para rodar isolado, sem ver o Discord de verdade nem a rede:
@@ -30,6 +31,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DAEMON = ROOT / "discord-game-presence.py"
 CLIENT = "111111111111111111"
+NEW_FIELDS = ("status_display_type", "details_url", "state_url")
 EXE = r"Z:\Games\Jogo Falso\fakegame.exe"
 
 
@@ -44,6 +46,7 @@ def load_daemon():
 class FakeDiscord:
     def __init__(self, path):
         self.events = []  # (hora, client_id, activity)
+        self.refused = []  # atividades com campos que este Discord nao conhece
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(path)
@@ -84,6 +87,14 @@ class FakeDiscord:
                     self.reply(conn, 1, {"cmd": "DISPATCH", "evt": "ACTIVITY_JOIN",
                                          "nonce": None, "data": {}})
                     activity = body["args"]["activity"]
+                    if activity and any(k in activity for k in NEW_FIELDS):
+                        with self.lock:
+                            self.refused.append(activity)
+                        self.reply(conn, 1, {"cmd": body["cmd"], "evt": "ERROR",
+                                             "nonce": body.get("nonce"),
+                                             "data": {"code": 4000,
+                                                      "message": "child \"activity\" fails"}})
+                        continue
                     with self.lock:
                         self.events.append((time.time(), client, activity))
                     self.reply(conn, 1, {"cmd": body["cmd"], "evt": None,
@@ -124,7 +135,8 @@ def main():
 
     games = {key: {"enabled": False} for key in load_daemon().GAMES}
     games["fakegame.exe"] = {"client_id": CLIENT, "details": "Jogo Falso",
-                             "state": "Jogando", "large_text": "Jogo Falso"}
+                             "state": "Jogando", "large_text": "Jogo Falso",
+                             "status_display": "details"}
     (config / "discord-game-presence.json").write_text(json.dumps({"games": games}))
 
     results = []
@@ -161,6 +173,9 @@ def main():
                   f"{start - daemon_started:+.1f}s do daemon")
             check("texto publicado", shown[2].get("details") == "Jogo Falso"
                   and shown[2].get("state") == "Jogando")
+            check("Discord antigo recusou os campos novos e saiu a versao sem eles",
+                  bool(discord.refused) and not any(k in shown[2] for k in NEW_FIELDS),
+                  f"{len(discord.refused)} recusa(s)")
 
         killed = time.time()
         game.kill()
@@ -178,6 +193,8 @@ def main():
         if again:
             check("novo tempo para a nova sessao",
                   again[2]["timestamps"]["start"] >= int(later) - 1)
+            check("sessao nova tenta os campos novos uma vez so",
+                  len(discord.refused) <= 2, f"{len(discord.refused)} recusa(s)")
 
         published = [e for e in discord.events if e[2]]
         check("nada alem do jogo foi publicado",

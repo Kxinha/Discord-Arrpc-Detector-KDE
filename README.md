@@ -41,8 +41,8 @@ daemon publica a presença.
 | **TBH: Task Bar Hero** | `TaskBarHero.exe` sob Proton | "Jogando" |
 | **Roblox** (Sober) | processo `sober` | **nome da experiência**, criador, ícone e quantos estão jogando |
 | **Stremio** (nativo ou Flatpak) | processo + MPRIS | **série — episódio** ("Prison Break — Unearthed (2x9)") |
-| **YouTube** (Firefox, Chrome, Chromium, Brave, Vivaldi, Edge) | MPRIS + URL da aba | **título e canal**, miniatura do vídeo (Shorts e lives também), progresso, botão do vídeo |
-| **YouTube Music** (os mesmos navegadores) | MPRIS + URL da aba | **faixa — artista**, capa do álbum, progresso, botões |
+| **YouTube** (Firefox, Chrome, Chromium, Brave, Vivaldi, Edge) | MPRIS + a aba do navegador | **título e canal** com link, miniatura do vídeo, progresso, "pausado em 3:21", **"🔴 Ao vivo"**, **Shorts**, **"Anúncio"**, e o que você navega sem vídeo ("Na página inicial", "Pesquisando", "No canal Blender", "Nas inscrições") |
+| **YouTube Music** (os mesmos navegadores) | MPRIS + a aba do navegador | **faixa e artista** com link, capa, progresso, pausado, anúncio, e a página aberta ("Na biblioteca", "Explorando") |
 | **Claude Code** | nome do executável | "Programming" e o tempo de sessão — nada além disso |
 
 Adicionar um app novo é escolher no menu da bandeja, ou editar um JSON —
@@ -227,6 +227,8 @@ player MPRIS com o serviço reconhecido.
 | `cmdline` | trecho qualquer da linha de comando, o jeito antigo (editores, `grep` e `tail` não contam) |
 | `match` | lista de regras alternativas, cada uma com `exe`/`args`/`cmdline` |
 | `grace` | segundos de tolerância antes de apagar quando o app some (útil para mídia) |
+| `status_display` | o que a lista de membros mostra depois de "Jogando/Ouvindo/Assistindo": `"name"` (o app), `"details"` (1ª linha) ou `"state"` (2ª linha) |
+| `show_search` | só YouTube e YouTube Music: `true` mostra o termo pesquisado ("Pesquisando blender"); o padrão esconde |
 
 Uma chave sem `/`, `\`, `:` ou espaço é tratada como `exe`; uma com algum
 deles continua valendo como trecho de linha de comando, então configs antigos
@@ -341,15 +343,42 @@ Music não se confundem, e quando duas abas do mesmo serviço existem, a que est
 tocando ganha da pausada.
 
 O Firefox põe a URL no MPRIS (`xesam:url`). **Chrome, Chromium, Brave, Vivaldi
-e Edge não põem**: publicam só título, canal e duração. Para eles a URL sai do
-histórico do próprio navegador (o arquivo `History` de cada perfil, aberto só
-para leitura): vale a visita das últimas 24 h cujo título de página é o que
-está tocando (`<título> - YouTube`, `<faixa> | YouTube Music`), com prioridade
-para o título exato. Nada do histórico vai para o Discord além do link do vídeo
-que já está na presença. Sem essa visita (histórico desligado, aba anônima) o
-player não conta como YouTube: melhor não mostrar do que mostrar o app errado.
-Em compensação o Chrome informa a posição sempre, então a barra de progresso
-fica exata.
+e Edge não põem**: publicam só título, canal e duração, um player por janela
+do navegador. Para eles o daemon descobre a aba assim, tudo só leitura e sem
+extensão:
+
+1. **Abas abertas**: o arquivo de sessão do perfil (`Sessions/Session_*`, o
+   mesmo que o navegador usa para reabrir as abas) diz a URL, o título e qual
+   aba está selecionada em cada janela. O navegador grava esse arquivo uns
+   2,5 s depois de cada navegação.
+2. **Janelas**: o KWin, pelo D-Bus, diz o título de cada janela do navegador
+   (que é o título da aba ativa) e se ela está minimizada. Isso dá o título
+   atual mesmo quando o arquivo de sessão ainda tem o antigo, que é o que
+   aparece em "No canal Blender".
+3. **Conferência**: o título que o player toca é comparado com o do vídeo da
+   URL (oEmbed do YouTube). Se não bate, é anúncio, ou a aba ainda não foi
+   gravada: o daemon espera 5 s segurando o que já mostrava e só depois
+   publica "Anúncio". Na troca de faixa do YouTube Music isso evita mostrar
+   a capa e o link da música anterior.
+4. **Histórico** (`History`, como antes) fica de reserva, para quando o arquivo
+   de sessão não serve.
+
+Um player novo só é atribuído a uma aba que esteja selecionada numa janela
+visível e seja a única candidata: som de outro site não vira YouTube. Nada das
+abas vai para o Discord além do que já está na presença. O Chrome informa a
+posição sempre, então a barra de progresso fica exata; numa live ele informa
+duração infinita, e o daemon mostra "🔴 Ao vivo" com o tempo assistido.
+
+Sem vídeo tocando, a aba do YouTube ou do YouTube Music selecionada numa janela
+não minimizada vira **navegação** ("Na página inicial", "Pesquisando", "Na
+playlist X", "Nas inscrições"...), por até 15 min na mesma página. O termo
+pesquisado **não** aparece por padrão; para mostrar, ligue `show_search`
+(veja abaixo).
+
+Os links clicáveis (no título, no canal e na imagem) e a linha da lista de
+membros ("Assistindo Big Buck Bunny" em vez de "Assistindo YouTube", campo
+`status_display`) são campos que o Discord documenta desde 2025. Um cliente
+que recuse esses campos recebe a mesma presença sem eles, automaticamente.
 
 Links de vídeo em qualquer formato dão a miniatura e o botão: `watch?v=`,
 `youtu.be/`, `/shorts/`, `/live/` e `/embed/`. Uma troca de faixa ou o autoplay
@@ -386,9 +415,10 @@ artista + título no caso do YouTube Music.
 
 ## Limites conhecidos
 
-- **O `type` é ignorado.** Mandar `2` (Ouvindo) ou `3` (Assistindo) é aceito
-  pelo IPC, mas o Discord responde com `type: 0` — via RPC, app comum só
-  publica como "Jogando". O formato de barra do Spotify não é alcançável.
+- **O `type` pode ser ignorado.** A documentação atual do Discord aceita `2`
+  (Ouvindo) e `3` (Assistindo) no `SET_ACTIVITY`, e o Vesktop repassa o pedido
+  ao RPC do próprio Discord, mas versões antigas respondiam com `type: 0`
+  ("Jogando"). Os links e o `status_display` caem fora sozinhos nesses casos.
 - **Botões não aparecem para você mesmo**, só para quem vê seu perfil.
 - **Stremio não publica posição**, então não há progresso real do episódio — o
   cronômetro reinicia a cada título novo.
@@ -396,9 +426,15 @@ artista + título no caso do YouTube Music.
   pausada continua sendo um player enquanto existir, e a presença ficava
   pendurada dizendo "(pausado)" por horas. Volta sozinha ao dar play.
 - Página de canal do YouTube não traz id de vídeo: sem miniatura nesse caso.
-- No Chrome e nos outros Chromium, o YouTube só é reconhecido com o histórico
-  ligado (aba anônima não conta), e o primeiro vídeo pode levar alguns
-  segundos para aparecer, o tempo de o navegador gravar a visita.
+- No Chrome e nos outros Chromium, aba anônima não conta (não entra no arquivo
+  de sessão). Um vídeo novo pode levar uns 5 s para aparecer, o tempo de o
+  navegador gravar a aba.
+- O Chrome expõe **um** player por instância. Com dois vídeos tocando ao mesmo
+  tempo em abas diferentes ele alterna qual deles informa, e a presença segue.
+- O nome da janela vem do KWin. Fora do Plasma a navegação usa só o arquivo de
+  sessão, cujo título pode estar velho: aparece "Num canal" em vez do nome.
+- O daemon consulta `youtube.com/oembed` e `i.ytimg.com` com o id do vídeo que
+  já vai na presença, para conferir o título e escolher a miniatura.
 - Se o Vesktop estiver com o arRPC ligado, ele também detecta sozinho os jogos
   que a base do Discord conhece (GTA SA sob Proton, por exemplo). Desligue a
   entrada correspondente na bandeja se aparecerem duas atividades.
@@ -461,14 +497,15 @@ packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /us
 ### Testes
 
 ```bash
-python3 -m unittest discover -s tests          # regras, YouTube, IPC, base do Discord, Minecraft
+python3 -m unittest discover -s tests          # regras, YouTube, abas do Chrome, IPC, base do Discord, Minecraft
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
       --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
       python3 tests/e2e_fake_discord.py        # o daemon inteiro contra um Discord falso
 ```
 
 O segundo roda o daemon de verdade contra um socket de IPC falso, sem ver o
-Discord real nem a rede, e confere a detecção, o tempo de jogo e a presença
+Discord real nem a rede, e confere a detecção, o tempo de jogo, a volta para a
+presença sem links quando o Discord recusa os campos novos, e a presença
 apagada ao fechar.
 
 ### Gerar os pacotes

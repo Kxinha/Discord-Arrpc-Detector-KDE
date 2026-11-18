@@ -24,11 +24,12 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -651,7 +652,7 @@ def media_timestamps(title, position, length, player=None):
     if not position:  # o player nao informa; talvez outro esteja com o mesmo
         position, other_length = position_elsewhere(title, player)
         length = length or other_length
-    if not (position and length) or position > length:
+    if not (position and length) or position > length or length >= LIVE_LENGTH:
         return None
     now = time.time()
     return {"start": int(now - position / 1_000_000),
@@ -670,11 +671,13 @@ def duration_label(length):
 
 # ------------------------------------------------ YouTube em qualquer navegador
 # O Firefox poe a URL da aba no MPRIS (xesam:url). O Chrome e os outros
-# Chromium nao poem: publicam so titulo, canal e duracao. Para eles a URL sai
-# do historico do proprio navegador, procurando a visita recente cujo titulo
-# de pagina e o titulo que esta tocando ("<titulo> - YouTube", "<faixa> |
-# YouTube Music"). Sem essa visita (historico desligado, aba anonima) o player
-# nao conta como YouTube: melhor nao mostrar do que mostrar o app errado.
+# Chromium nao poem: publicam so titulo, canal, duracao e posicao. Para eles a
+# pagina sai do arquivo de sessao do proprio navegador (Sessions/Session_*),
+# que guarda a URL e o titulo atuais de cada aba aberta e e regravado um ou
+# dois segundos depois de qualquer mudanca. O historico fica de reserva
+# (sessao criptografada, por exemplo), mas nao basta sozinho: ele guarda o
+# titulo so no comeco da visita, e o YouTube Music troca de faixa sem trocar
+# de visita, entao la a musica nova continua com o titulo "YouTube Music".
 
 CHROMIUM_PROCESSES = {"chrome", "chromium", "chromium-browser", "brave",
                       "brave-browser", "vivaldi-bin", "msedge", "opera",
@@ -687,6 +690,9 @@ CHROMIUM_FLATPAKS = {"com.google.Chrome": "google-chrome",
                      "com.brave.Browser": "BraveSoftware/Brave-Browser",
                      "com.vivaldi.Vivaldi": "vivaldi",
                      "com.microsoft.Edge": "microsoft-edge"}
+# fim do titulo da janela: "<titulo da aba ativa> - Google Chrome"
+BROWSER_SUFFIXES = (" - Google Chrome", " - Chromium", " - Brave", " - Vivaldi",
+                    " - Microsoft Edge", " - Opera", " - Thorium")
 HISTORY_MAX_AGE = 24 * 3600
 WEBKIT_EPOCH = 11644473600  # segundos entre 1601-01-01 e 1970-01-01
 HISTORY_SQL = """
@@ -697,7 +703,12 @@ HISTORY_SQL = """
     ORDER BY last_visit_time DESC LIMIT 20
 """
 
-_HISTORY_FILES = {"stamp": -1e9, "files": []}
+YT_ICON = ("https://cdn.discordapp.com/app-icons/1538427046760423474/"
+           "3f7a95b3c425b18bda601ff2f2e44b2d.png")
+YTM_ICON = ("https://cdn.discordapp.com/app-icons/1537975657735262368/"
+            "1637a3eccd8d9c22acf127e814bf088b.png")
+
+_PROFILES = {"stamp": -1e9, "dirs": []}
 _HISTORY_CACHE = {}
 
 
@@ -706,19 +717,24 @@ def config_home():
                                        pathlib.Path.home() / ".config"))
 
 
-def history_files():
-    """Os arquivos History de todos os perfis de navegadores Chromium."""
-    if time.monotonic() - _HISTORY_FILES["stamp"] < 60:
-        return _HISTORY_FILES["files"]
+def chromium_profiles():
+    """Pastas de perfil de todos os navegadores Chromium, nativos e Flatpak."""
+    if time.monotonic() - _PROFILES["stamp"] < 60:
+        return _PROFILES["dirs"]
     roots = [config_home() / d for d in CHROMIUM_DIRS]
     roots += [pathlib.Path.home() / ".var/app" / app / "config" / d
               for app, d in CHROMIUM_FLATPAKS.items()]
-    files = []
+    dirs = []
     for root in roots:
         for profile in ("Default", "Profile *"):
-            files += [pathlib.Path(p) for p in glob.glob(str(root / profile / "History"))]
-    _HISTORY_FILES.update(stamp=time.monotonic(), files=files)
-    return files
+            dirs += [pathlib.Path(p) for p in sorted(glob.glob(str(root / profile)))]
+    _PROFILES.update(stamp=time.monotonic(), dirs=dirs)
+    return dirs
+
+
+def history_files():
+    """Os arquivos History de todos os perfis de navegadores Chromium."""
+    return [p / "History" for p in chromium_profiles() if (p / "History").is_file()]
 
 
 def youtube_video_id(url):
@@ -753,18 +769,44 @@ def media_service(url):
     return None
 
 
-def page_title_is(page, title):
-    """O titulo da pagina e exatamente o do que esta tocando."""
-    page = re.sub(r"^\(\d+\+?\)\s*", "", page or "")  # "(3) " das notificacoes
+def url_path(url):
+    try:
+        return urllib.parse.urlsplit(url or "").path.rstrip("/") or "/"
+    except ValueError:
+        return "/"
+
+
+def is_live_page(url):
+    """/@canal/live, /channel/<id>/live ou /live/<id>."""
+    path = url_path(url)
+    return media_service(url) == "youtube" and (path.endswith("/live")
+                                                or path.startswith("/live/"))
+
+
+def is_player_page(url):
+    """Pagina que toca um video ou musica (e nao uma lista, busca ou canal)."""
+    path = url_path(url)
+    return bool(media_service(url)) and (
+        path in ("/watch",) or path.startswith(("/shorts/", "/live/"))
+        or is_live_page(url))
+
+
+def page_title(page):
+    """Titulo da pagina sem o "(3) " das notificacoes e sem o " - YouTube"."""
+    page = re.sub(r"^\(\d+\+?\)\s*", "", page or "")
     for suffix in (" - YouTube", " | YouTube Music", " - YouTube Music"):
         if page.endswith(suffix):
-            page = page[:-len(suffix)]
-            break
-    return page == title
+            return page[:-len(suffix)]
+    return page
+
+
+def page_title_is(page, title):
+    """O titulo da pagina e exatamente o do que esta tocando."""
+    return page_title(page) == title
 
 
 def history_url(title, files=None):
-    """URL do YouTube que o historico dos Chromium associa ao titulo."""
+    """URL do YouTube que o historico dos Chromium associa ao titulo exato."""
     if not title:
         return ""
     now = time.monotonic()
@@ -785,115 +827,715 @@ def history_url(title, files=None):
         except (sqlite3.Error, ValueError, OSError):
             continue  # arquivo no meio de uma escrita: fica para a proxima
         for url, page, visit in rows:
-            if not youtube_video_id(url):
-                continue
-            candidate = (page_title_is(page, title), visit or 0, url)
-            if best is None or candidate > best:
-                best = candidate
-    url = best[2] if best else ""
+            # so o titulo exato: "Intro" nao pode virar "Best Intro Ever"
+            if youtube_video_id(url) and page_title_is(page, title):
+                if best is None or (visit or 0) > best[0]:
+                    best = (visit or 0, url)
+    url = best[1] if best else ""
+    if len(_HISTORY_CACHE) > 500:
+        _HISTORY_CACHE.clear()
     _HISTORY_CACHE[title] = (url, now)
     return url
 
 
-def player_url(process, meta):
-    """Endereco da pagina que esta tocando: do MPRIS, ou do historico."""
-    url = meta.get("xesam:url") or ""
-    if url:
-        return url
-    if process in CHROMIUM_PROCESSES:
-        return history_url(meta.get("xesam:title") or "")
-    return ""
+# ------------------------------------------------ abas abertas do Chrome
+# Formato SNSS, de components/sessions/core no codigo do Chromium: cabecalho
+# "SNSS" + versao (3 em texto puro; a 5 e criptografada e fica de fora),
+# depois comandos [tamanho u16][id u8][dados]. O arquivo so cresce: cada
+# mudanca vira mais um comando no fim, e o estado atual e o resultado de
+# aplicar todos em ordem.
+SNSS_SIGNATURE = 0x53534E53
+SNSS_VERSION = 3
+CMD_TAB_WINDOW = 0         # (janela, aba)
+CMD_TAB_INDEX = 2          # (aba, posicao na janela)
+CMD_PRUNED_BACK = 5        # (aba, indice): navegacoes daqui em diante sairam
+CMD_NAVIGATION = 6         # pickle: aba, indice, url, titulo, ...
+CMD_SELECTED_NAV = 7       # (aba, indice da navegacao atual)
+CMD_SELECTED_TAB = 8       # (janela, posicao da aba selecionada)
+CMD_PRUNED_FRONT = 11      # (aba, quantas sairam do comeco)
+CMD_TAB_CLOSED = 16        # (aba, hora)
+CMD_WINDOW_CLOSED = 17     # (janela, hora)
+CMD_PRUNED = 24            # (aba, indice, quantas)
+SESSION_MAX_BYTES = 16 << 20
+
+_SESSIONS = {}
+_SESSIONS_LOCK = threading.Lock()
 
 
-def media_player(service):
-    """(player, metadata, url) de quem toca o servico pedido, ou None.
+class Tab:
+    """Uma aba aberta: url e titulo da navegacao atual."""
+    __slots__ = ("key", "window", "index", "selected", "url", "title")
 
-    Cada aba com midia pode virar um player e o bus name do Firefox muda a
-    cada boot, entao a escolha e pela URL, nao pelo nome. Entre duas abas do
-    mesmo servico, a que esta tocando ganha da que esta pausada.
+    def __init__(self, key, window, index, selected, url, title):
+        self.key, self.window, self.index = key, window, index
+        self.selected, self.url, self.title = selected, url, title
+
+    def __repr__(self):
+        return f"Tab({self.url!r}, {self.title!r}, selected={self.selected})"
+
+
+def _pickle_string(buf, pos, wide=False):
+    """string (ou string16) de um base::Pickle: tamanho int32 + dados
+    alinhados em 4 bytes."""
+    (count,) = struct.unpack_from("<i", buf, pos)
+    pos += 4
+    size = count * 2 if wide else count
+    if count < 0 or pos + size > len(buf):
+        raise ValueError("string maior que o comando")
+    raw = bytes(buf[pos:pos + size])
+    return raw.decode("utf-16-le" if wide else "utf-8", "replace"), pos + ((size + 3) & ~3)
+
+
+def _prune(info, index, count=None):
+    """Mesmo ajuste que o Chromium faz ao podar navegacoes de uma aba."""
+    navs = info["navs"]
+    if count is None:  # do indice ate o fim
+        info["navs"] = {i: v for i, v in navs.items() if i < index}
+        return
+    current = info["nav"]
+    if index <= current < index + count:
+        info["nav"] = index - 1
+    elif current >= index + count:
+        info["nav"] = current - count
+    info["navs"] = {(i - count if i >= index + count else i): v
+                    for i, v in navs.items() if not index <= i < index + count}
+
+
+def parse_session(data, profile=""):
+    """Abas abertas descritas por um arquivo de sessao SNSS, em ordem."""
+    if len(data) < 8 or struct.unpack_from("<ii", data) != (SNSS_SIGNATURE, SNSS_VERSION):
+        return []
+    tabs, selected, closed_windows = {}, {}, set()
+
+    def tab(tab_id):
+        return tabs.setdefault(tab_id, {"window": None, "index": 0, "nav": 0, "navs": {}})
+
+    pos = 8
+    while pos + 3 <= len(data):
+        (size,) = struct.unpack_from("<H", data, pos)
+        if size < 1 or pos + 2 + size > len(data):
+            break  # ultimo comando pela metade: o navegador ainda esta gravando
+        command, body = data[pos + 2], data[pos + 3:pos + 2 + size]
+        pos += 2 + size
+        try:
+            if command == CMD_NAVIGATION:
+                # o pickle comeca pelo proprio tamanho (uint32)
+                tab_id, index = struct.unpack_from("<ii", body, 4)
+                url, at = _pickle_string(body, 12)
+                title, _ = _pickle_string(body, at, wide=True)
+                tab(tab_id)["navs"][index] = (url, title)
+            elif command == CMD_TAB_WINDOW:
+                window, tab_id = struct.unpack_from("<ii", body)
+                tab(tab_id)["window"] = window
+            elif command == CMD_TAB_INDEX:
+                tab_id, index = struct.unpack_from("<ii", body)
+                tab(tab_id)["index"] = index
+            elif command == CMD_SELECTED_NAV:
+                tab_id, index = struct.unpack_from("<ii", body)
+                tab(tab_id)["nav"] = index
+            elif command == CMD_SELECTED_TAB:
+                window, index = struct.unpack_from("<ii", body)
+                selected[window] = index
+            elif command == CMD_TAB_CLOSED:
+                tabs.pop(struct.unpack_from("<i", body)[0], None)
+            elif command == CMD_WINDOW_CLOSED:
+                closed_windows.add(struct.unpack_from("<i", body)[0])
+            elif command == CMD_PRUNED_BACK:
+                tab_id, index = struct.unpack_from("<ii", body)
+                _prune(tab(tab_id), index)
+            elif command == CMD_PRUNED_FRONT:
+                tab_id, count = struct.unpack_from("<ii", body)
+                _prune(tab(tab_id), 0, count)
+            elif command == CMD_PRUNED:
+                tab_id, index, count = struct.unpack_from("<iii", body)
+                _prune(tab(tab_id), index, count)
+        except (struct.error, ValueError):
+            continue  # comando que nao entendemos: os outros continuam valendo
+    found = []
+    for tab_id, info in tabs.items():
+        page = info["navs"].get(info["nav"])
+        if info["window"] is None or info["window"] in closed_windows or not page:
+            continue
+        found.append(Tab((profile, tab_id), info["window"], info["index"],
+                         selected.get(info["window"]) == info["index"], *page))
+    found.sort(key=lambda t: (t.window, t.index))
+    return found
+
+
+def session_tabs(profile):
+    """Abas do arquivo de sessao mais recente do perfil (relido so quando muda)."""
+    files = []
+    for path in glob.glob(str(pathlib.Path(profile) / "Sessions" / "Session_*")):
+        try:
+            files.append((os.stat(path).st_mtime_ns, path))
+        except OSError:
+            continue
+    if not files:
+        return []
+    mtime, path = max(files)
+    try:
+        size = os.stat(path).st_size
+        stamp = (path, mtime, size)
+        with _SESSIONS_LOCK:
+            cached = _SESSIONS.get(profile)
+            if cached and cached[0] == stamp:
+                return cached[1]
+        with open(path, "rb") as f:
+            data = f.read(SESSION_MAX_BYTES)
+    except OSError:
+        return []
+    tabs = parse_session(data, str(profile))
+    with _SESSIONS_LOCK:
+        _SESSIONS[profile] = (stamp, tabs)
+    return tabs
+
+
+def open_tabs():
+    """Todas as abas abertas em todos os perfis de navegadores Chromium."""
+    tabs = []
+    for profile in chromium_profiles():
+        tabs += session_tabs(profile)
+    return tabs
+
+
+# ------------------------------------------------ janelas, pelo KWin
+_WINDOWS = {"stamp": -1e9, "list": None}
+_WINDOWS_LOCK = threading.Lock()
+WINDOWS_TTL = 3
+
+
+def browser_windows():
+    """[(titulo da aba ativa, minimizada)] das janelas de navegador.
+
+    O KWin conhece o titulo de cada janela (o do Chrome e o da aba ativa) e
+    sabe se ela esta minimizada, coisa que o proprio Chrome nao fica sabendo
+    no Wayland. None quando o KWin nao responde: ai nao da para saber o que
+    esta na tela, e a navegacao sem midia fica de fora da presenca.
     """
-    best = None
-    for name, process in mpris_players():
-        props = mpris_props(name)
-        meta = props.get("Metadata")
-        if not isinstance(meta, dict):
-            continue
-        url = player_url(process, meta)
-        if media_service(url) != service:
-            continue
-        playing = props.get("PlaybackStatus") == "Playing"
-        if best is None or (playing and not best[0]):
-            best = (playing, name, meta, url)
-    return best[1:] if best else None
+    with _WINDOWS_LOCK:
+        if time.monotonic() - _WINDOWS["stamp"] < WINDOWS_TTL:
+            return _WINDOWS["list"]
+        found, uuids = None, []
+        # "window" lista todas as janelas; numa sessao traduzida a palavra
+        # muda, entao o nome do navegador (que esta no titulo) serve de reserva
+        for term in ("window", "Chrome", "Chromium", "Brave", "Vivaldi", "Edge", "Opera"):
+            out = busctl("--json=short", "call", "org.kde.KWin", "/WindowsRunner",
+                         "org.kde.krunner1", "Match", "s", term)
+            if out is None:
+                break  # sem KWin
+            found = found or []
+            try:
+                matches = unwrap(json.loads(out)["data"][0])
+            except (ValueError, KeyError, IndexError, TypeError):
+                matches = []
+            for match in matches:
+                caption = match[1] if len(match) > 1 else ""
+                if caption.endswith(BROWSER_SUFFIXES):
+                    uuids.append((match[0].split("_", 1)[-1], caption))
+            if term == "window" and matches:
+                break
+        windows = None if found is None else []
+        for uuid, caption in dict(uuids).items():
+            out = busctl("--json=short", "call", "org.kde.KWin", "/KWin",
+                         "org.kde.KWin", "getWindowInfo", "s", uuid)
+            try:
+                info = unwrap(json.loads(out)["data"][0]) if out else {}
+            except (ValueError, KeyError, IndexError, TypeError):
+                info = {}
+            caption = info.get("caption") or caption
+            for suffix in BROWSER_SUFFIXES:
+                if caption.endswith(suffix):
+                    windows.append((caption[:-len(suffix)], bool(info.get("minimized"))))
+                    break
+        _WINDOWS.update(stamp=time.monotonic(), list=windows)
+        return windows
 
 
-def firefox_player(wanted):
-    """Compatibilidade: primeiro player cuja URL satisfaz o teste."""
-    for name, process in mpris_players():
-        meta = mpris_meta(name)
-        if wanted(player_url(process, meta)):
-            return name
+def caption_service(title):
+    """"ytm", "youtube" ou None, pelo titulo da aba ativa de uma janela."""
+    if title == "YouTube Music" or title.endswith((" | YouTube Music", " - YouTube Music")):
+        return "ytm"
+    if title == "YouTube" or title.endswith(" - YouTube"):
+        return "youtube"
     return None
 
 
-def is_ytm(url):
-    return media_service(url) == "ytm"
+def service_windows(service, windows):
+    """Titulos das janelas visiveis cuja aba ativa e do servico."""
+    return [title for title, minimized in windows or []
+            if not minimized and caption_service(title) == service]
 
 
-def is_youtube(url):
-    return media_service(url) == "youtube"
+def visible_tab(tab, windows):
+    """A aba e a ativa de uma janela que nao esta minimizada.
+
+    A comparacao e pelo servico, nao pelo titulo: o Chrome so regrava o
+    arquivo de sessao quando a URL muda, entao o titulo gravado pode ser o da
+    pagina anterior; o da janela, que vem do KWin, esta sempre em dia.
+    """
+    return tab.selected and bool(service_windows(media_service(tab.url), windows))
 
 
-def ytm_player():
-    found = media_player("ytm")
-    return found[0] if found else None
+# ------------------------------------------------ o que cada player esta tocando
+# O Chrome publica um player MPRIS por vez, com titulo, canal, duracao e
+# posicao, mas sem dizer de qual aba. A aba sai assim, nesta ordem:
+#   1. a aba cujo titulo gravado e o titulo que esta tocando;
+#   2. a aba ja ligada ao mpris:trackid (cada aba tem o seu, e ele nao muda
+#      entre um video e outro nem durante os anuncios);
+#   3. a unica aba de video ativa numa janela visivel (aba que acabou de abrir).
+# Depois vem a conferencia: o titulo tocado tem de ser o do video daquela URL
+# (oEmbed do YouTube). Nao sendo, e anuncio (o YouTube publica o anunciante
+# como se fosse o video, as vezes um clipe de minutos) ou uma navegacao que o
+# Chrome ainda nao gravou (ele grava uns 2,5 s depois). Por isso o anuncio so
+# vale depois de AD_CONFIRM segundos; antes disso a presenca segura o que ja
+# mostrava.
+AD_CONFIRM = 5
+LIVE_LENGTH = 1 << 53  # o Chrome informa INT64_MAX como duracao de uma live
+_TRACK_TAB = {}  # trackid -> (aba, URL, titulo) da ultima vez que bateu
+_MISMATCH = {}
+_MEDIA = {"stamp": -1e9, "found": []}
+_MEDIA_LOCK = threading.Lock()
 
 
-def ytm_running():
-    player = ytm_player()
-    return player if player and not media_idle(player) else None
+def find_tab(title, tabs):
+    """Aba do YouTube cujo titulo e o do que esta tocando; a selecionada ganha."""
+    best = None
+    for tab in tabs:
+        if media_service(tab.url) and page_title(tab.title) == title:
+            if best is None or (tab.selected and not best.selected):
+                best = tab
+    return best
+
+
+def _norm(text, keep_spaces=True):
+    text = (text or "").casefold().replace("’", "'").replace("‘", "'")
+    if not keep_spaces:
+        return re.sub(r"[^\w]", "", text)
+    return " ".join(text.split())
+
+
+def title_fits(title, artist, video, service, strict=False):
+    """O que o player toca e o video dessa URL? None quando nao da para saber.
+
+    No YouTube o titulo e identico. No YouTube Music o player usa o nome da
+    faixa ("Together Forever (2022 Remaster)") e o video tem o do clipe
+    ("Rick Astley - Together Forever (Official Video)"): vale o nome sem os
+    parenteses dentro do titulo, ou o artista no nome do canal. Com strict o
+    artista nao basta, porque a proxima faixa pode ser do mesmo artista.
+    """
+    info = youtube_oembed(video) if video else {}
+    real = _norm(info.get("title"))
+    if not real:
+        return None
+    mine = _norm(title)
+    core = _norm(re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", title or ""))
+    if mine == real or (len(core) >= 3 and core in real):
+        return True
+    if service == "ytm" and not strict:
+        singer, channel = _norm(artist, False), _norm(info.get("author_name"), False)
+        if len(singer) >= 3 and channel and (singer in channel or channel in singer):
+            return True
+    return False
+
+
+def _mismatch_age(player, title):
+    seen = _MISMATCH.get(player)
+    if not seen or seen[0] != title:
+        seen = _MISMATCH[player] = (title, time.monotonic())
+    return time.monotonic() - seen[1]
+
+
+def _newest(tabs):
+    """Abas do perfil cujo arquivo de sessao foi gravado por ultimo."""
+    if len(tabs) < 2:
+        return tabs
+    stamps = {}
+    with _SESSIONS_LOCK:
+        for profile, (stamp, _tabs) in _SESSIONS.items():
+            stamps[str(profile)] = stamp[1]
+    best = max(stamps.get(t.key[0], 0) for t in tabs)
+    return [t for t in tabs if stamps.get(t.key[0], 0) == best]
+
+
+def resolve_player(name, process, props, tabs, windows=None):
+    """Servico, pagina e situacao (anuncio, aguardando) de um player MPRIS."""
+    meta = props.get("Metadata")
+    meta = meta if isinstance(meta, dict) else {}
+    title = meta.get("xesam:title") or ""
+    artist = first(meta.get("xesam:artist")) or ""
+    track = meta.get("mpris:trackid") or ""
+    media = {"player": name, "process": process, "meta": meta,
+             "status": props.get("PlaybackStatus"), "url": "", "service": None,
+             "source": "-", "tab": None, "video": None, "ad": False, "pending": False}
+
+    url = meta.get("xesam:url") or ""
+    if url:  # o Firefox diz a URL
+        media.update(url=url, service=media_service(url), source="xesam:url",
+                     video=youtube_video_id(url))
+        return media
+    if process not in CHROMIUM_PROCESSES or not title:
+        return media
+
+    owner, how = find_tab(title, tabs), "aba"
+    if owner is None and track in _TRACK_TAB:
+        key = _TRACK_TAB[track][0]
+        owner, how = next((t for t in tabs if t.key == key), None), "aba do player"
+    if owner is None and track not in _TRACK_TAB and media["status"] == "Playing":
+        # aba nova: o trackid ainda nao foi visto. Vale so uma candidata,
+        # ativa numa janela visivel e sem player conhecido, para nao culpar o
+        # YouTube pelo som de outro site.
+        windows = browser_windows() if windows is None else windows
+        known = {seen[0] for seen in _TRACK_TAB.values()}
+        candidates = _newest([t for t in tabs if is_player_page(t.url)
+                              and t.key not in known and visible_tab(t, windows)])
+        owner, how = (candidates[0] if len(candidates) == 1 else None), "aba visivel"
+    if owner is None or not media_service(owner.url):
+        url = history_url(title)
+        if url:
+            media.update(url=url, service=media_service(url), source="historico",
+                         video=youtube_video_id(url))
+        return media
+
+    service = media_service(owner.url)
+    video = youtube_video_id(owner.url) or live_video_id(owner.url)
+    # mesma aba, mesma URL e outro titulo: anuncio, ou o Chrome ainda nao
+    # gravou a URL da faixa nova. A URL velha nao serve para o titulo novo.
+    seen = _TRACK_TAB.get(track)
+    stale = bool(seen) and seen[:2] == (owner.key, owner.url) and seen[2] != title
+    fits = title_fits(title, artist, video, service, strict=stale)
+    if fits is None:  # sem oEmbed (sem rede, video privado): sinais locais
+        fits = not stale if how == "aba do player" else how == "aba"
+    media.update(url=owner.url, service=service, tab=owner, video=video)
+    if fits:
+        if track:
+            if len(_TRACK_TAB) > 200:
+                _TRACK_TAB.clear()
+            _TRACK_TAB[track] = (owner.key, owner.url, title)
+        _MISMATCH.pop(name, None)
+        media["source"] = how
+    elif _mismatch_age(name, title) < AD_CONFIRM:
+        media.update(pending=True, source="aguardando a aba")
+    else:
+        media.update(ad=True, source="anuncio")
+    return media
+
+
+def media_now():
+    """Todos os players MPRIS, cada um com a pagina que ele esta tocando."""
+    with _MEDIA_LOCK:
+        if time.monotonic() - _MEDIA["stamp"] < MPRIS_TTL:
+            return _MEDIA["found"]
+        players = mpris_players()
+        chromium = any(process in CHROMIUM_PROCESSES for _, process in players)
+        tabs = open_tabs() if chromium else []
+        found = [resolve_player(name, process, mpris_props(name), tabs)
+                 for name, process in players]
+        _MEDIA.update(stamp=time.monotonic(), found=found)
+        return found
+
+
+def player_url(process, meta):
+    """Compatibilidade: endereco da pagina que esta tocando."""
+    media = resolve_player("", process, {"Metadata": meta}, open_tabs(), windows=[])
+    return media["url"]
+
+
+def media_player(service):
+    """O player que toca o servico pedido, ou None.
+
+    Cada aba com midia pode virar um player e o bus name do Firefox muda a
+    cada boot, entao a escolha e pela pagina, nao pelo nome. Entre dois
+    players do mesmo servico, o que esta tocando ganha do que esta pausado.
+    """
+    best = None
+    for media in media_now():
+        if media["service"] != service:
+            continue
+        if best is None or (media["status"] == "Playing" and best["status"] != "Playing"):
+            best = media
+    return best
+
+
+# ------------------------------------------------ navegando, sem nada tocando
+BROWSE_IDLE = 900  # mesma pagina parada por mais tempo que isso: saiu de perto
+_BROWSE = {}
+
+
+def browsing(service):
+    """(aba, titulo atual) do servico ativa numa janela visivel, fora de uma
+    pagina de player, ou None."""
+    windows = browser_windows()
+    if not windows:
+        return None
+    tabs = _newest([t for t in open_tabs() if media_service(t.url) == service
+                    and not is_player_page(t.url) and visible_tab(t, windows)])
+    if not tabs:
+        return None
+    # o titulo gravado pode estar velho; o da janela, quando so ha uma, nao
+    captions = service_windows(service, windows)
+    return tabs[0], (captions[0] if len(captions) == 1 else tabs[0].title)
+
+
+def browse_since(service, tab):
+    """Desde quando o servico esta sendo navegado, ou None se parou de vez."""
+    now = time.monotonic()
+    if tab is None:
+        _BROWSE.pop(service, None)
+        return None
+    url, page_since, since = _BROWSE.get(service, (None, now, now))
+    if tab.url != url:
+        page_since = now
+    _BROWSE[service] = (tab.url, page_since, since)
+    if now - page_since > BROWSE_IDLE:
+        return None
+    return time.time() - (now - since)
+
+
+YT_PAGES = [("/feed/subscriptions", "Nas inscrições"), ("/feed/history", "No histórico"),
+            ("/feed/trending", "Em alta"), ("/feed/explore", "Explorando"),
+            ("/feed/library", "Na biblioteca"), ("/feed/you", "Na biblioteca"),
+            ("/feed/playlists", "Nas playlists"), ("/feed/channels", "Nos canais"),
+            ("/feed/downloads", "Nos downloads"), ("/gaming", "Em jogos")]
+YTM_PAGES = [("/explore", "Explorando"), ("/library", "Na biblioteca"),
+             ("/charts", "Nas paradas"), ("/new_releases", "Nos lançamentos"),
+             ("/moods_and_genres", "Em gêneros"), ("/playlist", "Numa playlist"),
+             ("/channel", "Na página de um artista"), ("/browse", "Num álbum")]
+
+
+def browse_text(service, tab, title=None, show_search=False):
+    """(details, link) de uma pagina de navegacao do YouTube ou do YT Music."""
+    path = url_path(tab.url)
+    try:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(tab.url).query)
+    except ValueError:
+        query = {}
+    name = page_title(title or tab.title)
+    if path == "/":
+        return "Na página inicial", None
+    if path in ("/results", "/search"):
+        term = (query.get("search_query") or query.get("q") or [""])[0]
+        return (f"Pesquisando {term}" if show_search and term else "Pesquisando"), None
+    if service == "youtube":
+        named = name and name != "YouTube"  # titulo de outra pagina ainda
+        if path.startswith(("/@", "/channel/", "/c/", "/user/")):
+            return (f"No canal {name}" if named else "Num canal"), tab.url
+        if path == "/playlist":
+            return (f"Na playlist {name}" if named else "Numa playlist"), tab.url
+        for prefix, text in YT_PAGES:
+            if path.startswith(prefix):
+                return text, None
+    else:
+        for prefix, text in YTM_PAGES:
+            if path.startswith(prefix):
+                return text, None
+    return "Navegando", None
+
+
+# ------------------------------------------------ dados publicos do video
+_THUMBS = {}
+_OEMBED = {}
+_LIVE_IDS = {}
+CANONICAL = re.compile(rb'<link rel="canonical" href="https://www\.youtube\.com/watch\?v=([\w-]{11})"')
+
+
+def _trim(cache, limit=500):
+    if len(cache) > limit:
+        cache.clear()
+
+
+def video_thumbnail(video):
+    """Capa 16:9 sem tarja preta (maxresdefault) quando existe, senao a
+    hqdefault, que todo video tem."""
+    if video in _THUMBS:
+        return _THUMBS[video]
+    best = f"https://i.ytimg.com/vi/{video}/hqdefault.jpg"
+    request = urllib.request.Request(f"https://i.ytimg.com/vi/{video}/maxresdefault.jpg",
+                                     method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as r:
+            if r.status == 200:
+                best = request.full_url
+    except urllib.error.HTTPError:
+        pass  # 404: video sem capa em alta
+    except OSError:
+        return best  # sem rede agora: tenta de novo depois
+    _trim(_THUMBS)
+    _THUMBS[video] = best
+    return best
+
+
+def youtube_oembed(video):
+    """Titulo, canal e link do canal, pelo oEmbed publico do YouTube."""
+    if video in _OEMBED:
+        return _OEMBED[video]
+    try:
+        data = fetch_json("https://www.youtube.com/oembed?format=json&url="
+                          + urllib.parse.quote(f"https://www.youtube.com/watch?v={video}"))
+    except urllib.error.HTTPError:
+        data = {}  # privado ou sem incorporacao: nao adianta repetir
+    except (OSError, ValueError):
+        return {}
+    _trim(_OEMBED)
+    _OEMBED[video] = data if isinstance(data, dict) else {}
+    return _OEMBED[video]
+
+
+def live_video_id(url):
+    """Id do video de um link /@canal/live, pelo link canonico da pagina."""
+    if not is_live_page(url):
+        return None
+    cached = _LIVE_IDS.get(url)
+    if cached and time.monotonic() - cached[1] < 600:
+        return cached[0]
+    video, page, total = None, b"", 0
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=8) as r:
+            while total < 3_000_000:  # o link fica perto de 800 KB pagina adentro
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                page = page[-200:] + chunk
+                found = CANONICAL.search(page)
+                if found:
+                    video = found.group(1).decode()
+                    break
+    except OSError:
+        return None
+    _trim(_LIVE_IDS)
+    _LIVE_IDS[url] = (video, time.monotonic())
+    return video
+
+
+# ------------------------------------------------ YouTube e YouTube Music
+_LAST_STATE = {}
+
+
+def service_now(service):
+    """("midia", player) ou ("navegando", (aba, desde)) do servico, ou None."""
+    media = media_player(service)
+    if media and not media_idle(media["player"]):
+        browse_since(service, None)
+        return "midia", media
+    page = browsing(service)
+    since = browse_since(service, page[0] if page else None)
+    if page and since:
+        return "navegando", (*page, since)
+    return None
 
 
 def yt_running():
-    found = media_player("youtube")
-    return found[0] if found and not media_idle(found[0]) else None
+    now = service_now("youtube")
+    if not now:
+        return None
+    return now[1]["player"] if now[0] == "midia" else "navegando no YouTube"
 
 
-def yt_title():
-    """Titulo do video, que vai na primeira linha da presenca."""
-    found = media_player("youtube")
-    if not found:
-        return "YouTube"
-    return (found[1].get("xesam:title") or "YouTube")[:128]
+def ytm_running():
+    now = service_now("ytm")
+    if not now:
+        return None
+    return now[1]["player"] if now[0] == "midia" else "navegando no YouTube Music"
+
+
+def _service_state(service, media_state):
+    now = service_now(service)
+    if not now:
+        return None
+    kind, item = now
+    if kind == "navegando":
+        state = browse_state(service, *item)
+    elif item["pending"]:  # troca de video que a aba ainda nao gravou
+        return _LAST_STATE.get(service)
+    else:
+        state = media_state(item)
+    _LAST_STATE[service] = state
+    return state
 
 
 def yt_state():
-    """Video em reproducao no YouTube: titulo, canal, capa e progresso."""
-    found = media_player("youtube")
-    if not found:  # aba fechada: encerra a presenca em vez de publicar generico
-        return None
-    player, meta, url = found
-    channel = first(meta.get("xesam:artist"))
-    title = meta.get("xesam:title") or "YouTube"
+    """Video, live, Shorts, anuncio, pausa ou a pagina aberta no YouTube."""
+    return _service_state("youtube", video_state)
 
-    extra = {}
-    video = youtube_video_id(url)
-    if video:  # miniatura do proprio video como icone
-        extra["large_image"] = f"https://i.ytimg.com/vi/{video}/hqdefault.jpg"
-        extra["large_text"] = title[:128]
-        extra["buttons"] = [{"label": "Assistir no YouTube",
-                             "url": f"https://youtu.be/{video}"}]
 
-    if mpris("PlaybackStatus", player) != "Playing":
-        anchored_position(title, mpris_position(player), playing=False)
-        return f"{channel} (pausado)" if channel else "Pausado", extra or None
+def ytm_state():
+    """Musica, anuncio, pausa ou a pagina aberta no YouTube Music."""
+    return _service_state("ytm", song_state)
+
+
+def browse_state(service, tab, title, since):
+    game = GAMES.get("youtube" if service == "youtube" else "youtube-music") or {}
+    details, link = browse_text(service, tab, title, bool(game.get("show_search")))
+    extra = {"details": details, "timestamps": {"start": int(since)},
+             "status_display_type": 0}  # "Assistindo YouTube", nao "Assistindo Pesquisando"
+    if link:
+        extra["details_url"] = link
+    return None, extra
+
+
+def paused_text(who, position):
+    where = f" em {duration_label(position)}" if position else ""
+    return f"{who} · pausado{where}" if who else f"Pausado{where}"
+
+
+def video_state(media):
+    meta, player, url = media["meta"], media["player"], media["url"]
+    channel = first(meta.get("xesam:artist")) or ""
+    title = meta.get("xesam:title") or ""
+    video = media.get("video") or youtube_video_id(url) or live_video_id(url)
+    shorts = url_path(url).startswith("/shorts/")
+    link = None
+    if video:
+        link = (f"https://www.youtube.com/shorts/{video}" if shorts
+                else f"https://www.youtube.com/watch?v={video}")
+    info = youtube_oembed(video) if video else {}
+    channel_url = info.get("author_url") or ""
+    channel_url = channel_url if channel_url.startswith("https://") else None
+
+    if media["ad"]:
+        # titulo e canal do player sao do anunciante; o video e o da aba, com
+        # o titulo do oEmbed (o gravado na aba pode ser o do video anterior)
+        name = info.get("title") or (page_title(media["tab"].title) if media["tab"] else "")
+        name = name if name and name not in ("YouTube", "YouTube Music") else "YouTube"
+        extra = {"details": name, "timestamps": None}
+        if video:
+            extra.update(details_url=link, large_image=video_thumbnail(video),
+                         large_text=name, small_image=YT_ICON, small_text="YouTube")
+        return "Anúncio", extra
+
+    extra = {"details": title or info.get("title") or "YouTube"}
+    if video:
+        extra.update(details_url=link, large_image=video_thumbnail(video),
+                     large_text=title or extra["details"], large_url=link,
+                     small_image=YT_ICON, small_text="YouTube",
+                     buttons=[{"label": "Assistir no YouTube", "url": link}])
+    if channel_url:
+        extra["state_url"] = channel_url
+        extra.setdefault("buttons", []).append({"label": "Ver o canal", "url": channel_url})
+
+    length = meta.get("mpris:length") or 0
+    live = length >= LIVE_LENGTH or is_live_page(url)
+    if media["status"] != "Playing":
+        position = mpris_position(player, tries=1)
+        anchored_position(title, position, playing=False)
+        extra["timestamps"] = None  # pausado: o relogio para
+        return paused_text(channel, None if live else position), extra
+    if live:
+        # a posicao de uma live conta desde que ela comecou a tocar aqui
+        position = mpris_position(player)
+        if position:
+            extra["timestamps"] = {"start": int(time.time() - position / 1_000_000)}
+        return (f"🔴 Ao vivo · {channel}" if channel else "🔴 Ao vivo"), extra
 
     length = track_length(title, meta, video)
     position = anchored_position(title, mpris_position(player))
     extra["timestamps"] = media_timestamps(title, position, length, player)
     text = channel or "YouTube"
+    if shorts:
+        text = f"Shorts · {channel}" if channel else "Shorts"
     if not extra["timestamps"] and length:  # sem barra, ao menos a duracao
-        text = f"{text}  ·  {duration_label(length)}"
+        text = f"{text} · {duration_label(length)}"
     return text, extra
 
 
@@ -902,11 +1544,11 @@ _ART_CACHE = {}
 
 def ytm_art(meta, url=None):
     """Capa da musica. O navegador nao publica uma capa utilizavel, entao:
-    miniatura do video quando a URL traz o id, senao a capa do album pela
+    a capa do proprio video quando a pagina traz o id, senao a do album pela
     busca do iTunes."""
     video = youtube_video_id(url or meta.get("xesam:url") or "")
     if video:
-        return f"https://i.ytimg.com/vi/{video}/hqdefault.jpg"
+        return video_thumbnail(video)
 
     artist = first(meta.get("xesam:artist"))
     term = " ".join(filter(None, [artist, meta.get("xesam:title")])).strip()
@@ -925,43 +1567,49 @@ def ytm_art(meta, url=None):
             art = results[0].get("artworkUrl100", "").replace("100x100", "600x600")
     except (OSError, ValueError):
         pass
+    _trim(_ART_CACHE)
     _ART_CACHE[term] = art
     return art
 
 
-def ytm_state():
-    """Musica atual, progresso na faixa e links."""
-    found = media_player("ytm")
-    if not found:  # aba fechada: encerra a presenca em vez de publicar generico
-        return None
-    player, meta, url = found
-    artist = first(meta.get("xesam:artist"))
-    title = meta.get("xesam:title") or "YouTube Music"
-    label = f"{title} — {artist}" if artist else title
+def song_state(media):
+    meta, player, url = media["meta"], media["player"], media["url"]
+    artist = first(meta.get("xesam:artist")) or ""
+    title = meta.get("xesam:title") or ""
+    album = meta.get("xesam:album") or ""
+    video = media.get("video") or youtube_video_id(url)
+    link = f"https://music.youtube.com/watch?v={video}" if video else None
 
-    extra = {}
-    art = ytm_art(meta, url)
+    if media["ad"]:
+        return None, {"details": "Anúncio", "timestamps": None, "status_display_type": 0}
+
+    extra = {"details": title or "YouTube Music"}
+    art = video_thumbnail(video) if video else ytm_art(meta, url)
     if art:  # capa da musica no lugar do icone do app
-        extra["large_image"] = art
-        extra["large_text"] = meta.get("xesam:album") or title
-    if url:
-        extra["buttons"] = [{"label": "Ouvir no YouTube Music", "url": url}]
+        extra.update(large_image=art, small_image=YTM_ICON, small_text="YouTube Music",
+                     large_text=album or (f"{title} · {artist}" if artist else title))
+    if link:
+        extra.update(details_url=link, large_url=link,
+                     buttons=[{"label": "Ouvir no YouTube Music", "url": link}])
     if artist:  # o MPRIS nao traz o canal do artista, entao vai pela busca
-        query = urllib.parse.quote(artist)
+        artist_url = "https://music.youtube.com/search?q=" + urllib.parse.quote(artist)
+        extra["state_url"] = artist_url
         extra.setdefault("buttons", []).append(
-            {"label": f"Artista: {artist}"[:32],
-             "url": f"https://music.youtube.com/search?q={query}"})
+            {"label": f"Artista: {artist}"[:32], "url": artist_url})
 
-    if mpris("PlaybackStatus", player) != "Playing":
-        anchored_position(title, mpris_position(player), playing=False)
-        return f"{label} (pausado)", extra or None
+    if media["status"] != "Playing":
+        position = mpris_position(player, tries=1)
+        anchored_position(title, position, playing=False)
+        extra["timestamps"] = None
+        return paused_text(artist, position), extra
 
     length = track_length(title, meta)
     position = anchored_position(title, mpris_position(player))
     extra["timestamps"] = media_timestamps(title, position, length, player)
+    text = artist or "YouTube Music"
     if not extra["timestamps"] and length:
-        label = f"{label}  ·  {duration_label(length)}"
-    return label, extra
+        text = f"{text} · {duration_label(length)}"
+    return text, extra
 
 
 def stremio_player():
@@ -1745,34 +2393,35 @@ GAMES = {
         "state": "Jogando",
         "large_text": "TBH: Task Bar Hero",
     },
-    # Toca no navegador, entao a presenca segue o MPRIS, nao um processo proprio.
-    # Precisa de um app criado em discord.com/developers/applications.
+    # Toca no navegador, entao a presenca segue o MPRIS e as abas abertas, nao
+    # um processo proprio. Precisa de um app em discord.com/developers.
     "youtube-music": {
         "poll": 5,  # a posicao so aparece em janelas curtas
         "grace": 10,  # troca de faixa derruba o player por um instante
         "client_id": "1537975657735262368",
-        "details": "YouTube Music",
-        "state": ytm_state,
+        "details": "YouTube Music",  # o state troca pela musica
+        "state": ytm_state,          # artista, capa, progresso, anuncio, pagina
         "large_text": "YouTube Music",
-        "large_image": ("https://cdn.discordapp.com/app-icons/1537975657735262368/"
-                        "1637a3eccd8d9c22acf127e814bf088b.png"),
+        "large_image": YTM_ICON,
         "running": ytm_running,
         "type": 2,  # Ouvindo
+        "status_display": "details",  # lista de membros: "Ouvindo <musica>"
+        "show_search": False,  # True mostra o termo pesquisado
     },
-    # Videos comuns do YouTube, em qualquer navegador, tambem via MPRIS. Precisa
-    # de um app proprio: "YouTube" nao existe na base detectavel do Discord.
+    # Videos do YouTube em qualquer navegador. Precisa de um app proprio:
+    # "YouTube" nao existe na base detectavel do Discord.
     "youtube": {
         "poll": 5,  # a posicao so aparece em janelas curtas
         "grace": 10,  # o autoplay derruba o player por um instante
         "client_id": "1538427046760423474",
-        "details": yt_title,   # titulo do video
-        # usado quando o video nao expoe id na URL (pagina de canal, por exemplo)
-        "large_image": ("https://cdn.discordapp.com/app-icons/1538427046760423474/"
-                        "3f7a95b3c425b18bda601ff2f2e44b2d.png"),
-        "state": yt_state,     # canal, capa e progresso
+        "details": "YouTube",  # o state troca pelo titulo do video
+        "large_image": YT_ICON,  # quando nao ha capa (pagina de canal, busca)
+        "state": yt_state,     # canal, capa, progresso, live, Shorts, anuncio
         "large_text": "YouTube",
         "running": yt_running,
         "type": 3,  # Assistindo
+        "status_display": "details",  # lista de membros: "Assistindo <video>"
+        "show_search": False,  # True mostra o termo pesquisado
     },
     # O Stremio nao esta na base detectavel do Discord: o client_id vem de um app
     # criado em discord.com/developers/applications. Sem ele, a entrada fica inativa.
@@ -1985,14 +2634,38 @@ def clean_text(value, limit=128):
     return value if len(value) <= limit else value[:limit - 1] + "…"
 
 
+def clean_url(value, limit=256):
+    """Link http(s) curto o bastante, ou None."""
+    value = str(value or "")
+    return value if value.startswith(("https://", "http://")) and len(value) <= limit else None
+
+
+# Tipos que o SET_ACTIVITY aceita (Jogando, Ouvindo, Assistindo, Competindo) e
+# qual linha vai para a lista de membros, segundo docs.discord.com.
+RPC_TYPES = {0, 2, 3, 5}
+STATUS_DISPLAY = {"name": 0, "state": 1, "details": 2}
+# Campos que o Discord passou a aceitar em 2025 (links nos textos e nas
+# imagens, linha da lista de membros). Se um cliente antigo recusar, a mesma
+# atividade sai de novo sem eles.
+NEW_FIELDS = ("details_url", "state_url", "status_display_type")
+NEW_ASSETS = ("large_url", "small_url")
+
+
 def sanitize_activity(activity):
     """Corta o que o Discord recusaria: um campo invalido derruba a atividade
     inteira, nao so o campo."""
-    out = {"type": activity.get("type", 0)}
+    kind = activity.get("type", 0)
+    out = {"type": kind if kind in RPC_TYPES else 0}
     for key in ("details", "state"):
         text = clean_text(activity.get(key))
         if text:
             out[key] = text
+            url = clean_url(activity.get(f"{key}_url"))
+            if url:
+                out[f"{key}_url"] = url
+    display = activity.get("status_display_type")
+    if display in (0, 1, 2) and not isinstance(display, bool):
+        out["status_display_type"] = display
     times = activity.get("timestamps") or {}
     times = {k: int(v) for k, v in times.items()
              if k in ("start", "end") and isinstance(v, (int, float)) and v > 0}
@@ -2000,13 +2673,17 @@ def sanitize_activity(activity):
         times.pop("end")
     if times:
         out["timestamps"] = times
-    assets = {}
-    image = (activity.get("assets") or {}).get("large_image")
-    if image and len(str(image)) <= 1024:
-        assets["large_image"] = str(image)
-    text = clean_text((activity.get("assets") or {}).get("large_text"))
-    if text:
-        assets["large_text"] = text
+    assets, given = {}, activity.get("assets") or {}
+    for size in ("large", "small"):
+        image = given.get(f"{size}_image")
+        if image and len(str(image)) <= 1024:
+            assets[f"{size}_image"] = str(image)
+            url = clean_url(given.get(f"{size}_url"))
+            if url:
+                assets[f"{size}_url"] = url
+        text = clean_text(given.get(f"{size}_text"))
+        if text:
+            assets[f"{size}_text"] = text
     if assets:
         out["assets"] = assets
     buttons = []
@@ -2023,6 +2700,14 @@ def sanitize_activity(activity):
         if (len(size) == 2 and all(isinstance(n, int) for n in size)
                 and 1 <= size[0] and 0 < size[1]):
             out["party"] = {"id": str(party.get("id")), "size": [min(size), size[1]]}
+    return out
+
+
+def legacy_activity(activity):
+    """A mesma atividade sem os campos de 2025."""
+    out = {k: v for k, v in activity.items() if k not in NEW_FIELDS}
+    if "assets" in out:
+        out["assets"] = {k: v for k, v in out["assets"].items() if k not in NEW_ASSETS}
     return out
 
 
@@ -2068,25 +2753,36 @@ def same_activity(old, new):
 def build_activity(game, state, start):
     """Atividade a publicar, a partir do (texto, extras) do state."""
     # o segundo item e o tamanho da party (lista) ou campos extras (dict:
-    # "timestamps", "buttons", "large_image", "large_text")
+    # "details", "timestamps", "buttons", "large_image", "large_text", links...)
     text, extra = state
-    details = game["details"]
     fields = extra if isinstance(extra, dict) else {}
+    details = fields["details"] if "details" in fields else game["details"]
+    assets = {
+        # nome de um Art Asset do app, ou uma URL de imagem; o state
+        # pode trocar a arte a cada faixa (capa da musica, por exemplo)
+        "large_image": fields.get("large_image") or game.get("large_image", "game"),
+        "large_text": fields.get("large_text") or game["large_text"],
+    }
+    for key in ("large_url", "small_image", "small_text", "small_url"):
+        if fields.get(key):
+            assets[key] = fields[key]
     activity = {
-        "type": game.get("type", 0),
+        "type": fields.get("type", game.get("type", 0)),
         "details": details() if callable(details) else details,
         "state": text,
         # jogo sem tempo proprio conta desde que o processo abriu; midia sem
-        # posicao conhecida manda None e fica sem tempo nenhum
+        # posicao conhecida (ou pausada) manda None e fica sem tempo nenhum
         "timestamps": fields["timestamps"] if "timestamps" in fields
                       else {"start": int(start)},
-        "assets": {
-            # nome de um Art Asset do app, ou uma URL de imagem; o state
-            # pode trocar a arte a cada faixa (capa da musica, por exemplo)
-            "large_image": fields.get("large_image") or game.get("large_image", "game"),
-            "large_text": fields.get("large_text") or game["large_text"],
-        },
+        "assets": assets,
     }
+    for key in ("details_url", "state_url"):
+        if fields.get(key):
+            activity[key] = fields[key]
+    display = fields.get("status_display_type",
+                         STATUS_DISPLAY.get(game.get("status_display")))
+    if display is not None:
+        activity["status_display_type"] = display
     if fields.get("buttons"):
         activity["buttons"] = fields["buttons"]
     if extra and not isinstance(extra, dict):  # "(45 of 1000)" ao lado do state
@@ -2133,7 +2829,7 @@ def session(key, game):
         log(f"publicou {game['large_text']}: "
             f"{activity.get('details')} | {activity.get('state')}{marca}")
 
-    published, refused, missing = None, None, None
+    published, refused, missing, legacy = None, None, None, False
     state, next_state = first_state, time.monotonic() + poll
     try:
         while True:
@@ -2148,11 +2844,20 @@ def session(key, game):
                 activity = build_activity(game, state, hit_start(hit) or opened)
                 if not same_activity(published, activity) and activity != refused:
                     try:
-                        publish(activity)
+                        publish(legacy_activity(activity) if legacy else activity)
                         published = activity
                     except IPCError as error:
-                        refused = activity  # nao insiste na mesma atividade recusada
-                        log(f"o Discord recusou {game['large_text']}: {error}")
+                        plain, reason = legacy_activity(activity), error
+                        if not legacy and plain != activity:
+                            try:  # cliente que nao conhece os campos de 2025
+                                publish(plain)
+                                published, legacy, reason = activity, True, None
+                                log(f"{game['large_text']}: publicado sem links ({error})")
+                            except IPCError as again:
+                                reason = again
+                        if reason is not None:
+                            refused = activity  # nao insiste na mesma atividade recusada
+                            log(f"o Discord recusou {game['large_text']}: {reason}")
             # Confere a cada poucos segundos se o app continua aberto, e so
             # rele o estado no ritmo dele: fechar o jogo tirava a presenca do
             # perfil so na volta seguinte, ate 15 s depois.
@@ -2230,15 +2935,19 @@ def scan_report():
         off = "" if enabled else "  [desligado]"
         lines.append(f"{mark}  {game['large_text']}{off}"
                      + (f"\n         {why}{since}" if hit else ""))
-    players = mpris_players()
-    if players:
+    found = media_now()
+    if found:
         lines += ["", "players MPRIS:"]
-        for name, process in players:
-            meta = mpris_meta(name)
-            url = player_url(process, meta)
-            origem = "xesam:url" if meta.get("xesam:url") else ("historico" if url else "-")
-            lines.append(f"  {name} ({process}): {media_service(url) or 'outro'}"
-                         f" via {origem}, {mpris_props(name).get('PlaybackStatus')}")
+        for media in found:
+            lines.append(f"  {media['player']} ({media['process']}): "
+                         f"{media['service'] or 'outro'} via {media['source']}, {media['status']}")
+    tabs = open_tabs()
+    if tabs:
+        lines += ["", f"abas do Chrome lidas: {len(tabs)}, do YouTube: "
+                      f"{sum(1 for t in tabs if media_service(t.url))}"]
+    windows = browser_windows()
+    lines.append("janelas do navegador pelo KWin: "
+                 + ("sem KWin" if windows is None else str(len(windows))))
     return "\n".join(lines)
 
 
