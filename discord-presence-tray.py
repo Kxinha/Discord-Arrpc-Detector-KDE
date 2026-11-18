@@ -13,6 +13,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -45,6 +46,14 @@ KDEGLOBALS = CONFIG_HOME / "kdeglobals"
 
 REFRESH_SECONDS = 8
 DETECTABLE_MAX_AGE = 7 * 24 * 3600
+UPDATE_FIRST_CHECK = 45          # seconds after the tray starts
+UPDATE_EVERY = 6 * 3600          # then every six hours
+UPDATE_MODES = [("Install updates automatically", "auto"),
+                ("Notify me, I click to install", "notify"),
+                ("Never check", "off")]
+KIND_LABELS = {"script": "installer script", "pacman": "pacman package",
+               "deb": ".deb package", "rpm": ".rpm package", "appimage": "AppImage",
+               "manual": "manual copy"}
 
 COLORS = [
     # Discord's own palette
@@ -195,10 +204,45 @@ def service_enabled():
     return systemctl("is-enabled", SERVICE).stdout.strip() == "enabled"
 
 
-def notify(body):
+def notify(body, title="Discord Presence", icon=None):
     if shutil.which("notify-send"):
-        subprocess.Popen(["notify-send", "-a", "Discord Presence",
-                          "Discord Presence", body])
+        subprocess.Popen(["notify-send", "-a", "Discord Presence"]
+                         + (["-i", icon] if icon else []) + [title, body])
+
+
+def ask(title, body, actions, on_choice, icon=None):
+    """A notification with buttons; on_choice(name) runs on the GTK thread.
+
+    notify-send --action blocks until the notification goes away and prints
+    the button that was clicked, so it waits on its own thread.
+    """
+    if not shutil.which("notify-send"):
+        return
+
+    def wait():
+        command = ["notify-send", "-a", "Discord Presence"] + (["-i", icon] if icon else [])
+        for name, label in actions:
+            command += ["-A", f"{name}={label}"]
+        try:
+            done = subprocess.run(command + [title, body], capture_output=True,
+                                  text=True, timeout=24 * 3600)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        choice = done.stdout.strip()
+        if choice:
+            GLib.idle_add(on_choice, choice)
+    threading.Thread(target=wait, daemon=True).start()
+
+
+def release_summary(notes, limit=180):
+    """First real line of the release notes, without the Markdown."""
+    for line in (notes or "").splitlines():
+        line = re.sub(r"^[#>*+\-\s]+", "", line)          # heading, quote, bullet
+        line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)  # [text](link)
+        line = re.sub(r"\*\*|__|`", "", line).strip()
+        if line:
+            return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
+    return ""
 
 
 def open_path(target):
@@ -341,6 +385,9 @@ class Tray:
         self.detected = set()
         self.suggestions = []
         self.updating = False   # guards programmatic toggles
+        self.release = None     # a newer release, once a check finds one
+        self.update_busy = None  # "checking" or "installing"
+        self.kind = None
 
         ICONS.mkdir(parents=True, exist_ok=True)
         self.current_icon = None
@@ -354,6 +401,9 @@ class Tray:
         self.refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, self.refresh)
         threading.Thread(target=self.rescan_suggestions, daemon=True).start()
+        threading.Thread(target=self.find_kind, daemon=True).start()
+        GLib.timeout_add_seconds(UPDATE_FIRST_CHECK, self.first_update_check)
+        GLib.idle_add(self.announce_new_version)
 
     # ---------------------------------------------------------------- look
     def tray_prefs(self):
@@ -412,6 +462,16 @@ class Tray:
         self.showing_item.set_sensitive(False)
         menu.append(self.showing_item)
 
+        if self.release or self.update_busy == "installing":
+            menu.append(Gtk.SeparatorMenuItem())
+            if self.update_busy == "installing":
+                item = Gtk.MenuItem(label=f"Updating to {self.release['version']}…")
+                item.set_sensitive(False)
+            else:
+                item = Gtk.MenuItem(label=f"⬆  Update to {self.release['version']}")
+                item.connect("activate", lambda *_: self.start_update())
+            menu.append(item)
+
         menu.append(Gtk.SeparatorMenuItem())
 
         apps = Gtk.MenuItem(label="Apps Discord can see")
@@ -429,6 +489,10 @@ class Tray:
         config = Gtk.MenuItem(label="Configuration")
         config.set_submenu(self.build_config_menu())
         menu.append(config)
+
+        updates = Gtk.MenuItem(label="Updates")
+        updates.set_submenu(self.build_updates_menu())
+        menu.append(updates)
 
         menu.append(Gtk.SeparatorMenuItem())
 
@@ -645,6 +709,220 @@ class Tray:
             menu.append(item)
         menu.show_all()
         return menu
+
+    def build_updates_menu(self):
+        menu = Gtk.Menu()
+        kind = KIND_LABELS.get(self.kind, "checking…") if self.kind else "checking…"
+        version = Gtk.MenuItem(label=f"Version {self.version()}  ·  {kind}")
+        version.set_sensitive(False)
+        menu.append(version)
+
+        if self.update_busy == "checking":
+            check = Gtk.MenuItem(label="Checking…")
+            check.set_sensitive(False)
+        else:
+            check = Gtk.MenuItem(label="Check for updates now")
+            check.connect("activate", lambda *_: self.check_updates(manual=True))
+            check.set_sensitive(self.update_busy is None and self.can_update())
+        menu.append(check)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        group = []
+        for label, mode in UPDATE_MODES:
+            if mode == "auto" and self.kind and self.kind not in self.self_updating():
+                label = "Install automatically (not for packages: needs your password)"
+            item = Gtk.RadioMenuItem(label=label, group=group[0] if group else None)
+            group.append(item)
+            item.set_active(self.update_mode() == mode)
+            if mode == "auto" and self.kind and self.kind not in self.self_updating():
+                item.set_sensitive(False)
+            item.connect("toggled", self.on_update_mode, mode)
+            menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        notes = Gtk.MenuItem(label="Release notes")
+        notes.connect("activate", lambda *_: open_path(self.release_page()))
+        menu.append(notes)
+
+        menu.show_all()
+        return menu
+
+    # ------------------------------------------------------------- updates
+    def version(self):
+        return getattr(self.daemon, "VERSION", "?") if self.daemon else "?"
+
+    def can_update(self):
+        return bool(self.daemon) and hasattr(self.daemon, "latest_release")
+
+    def self_updating(self):
+        return getattr(self.daemon, "SELF_UPDATING", ("script", "appimage"))
+
+    def release_page(self):
+        if self.release:
+            return self.release["page"]
+        return getattr(self.daemon, "RELEASES_PAGE", PROJECT_URL + "/releases")
+
+    def update_mode(self):
+        mode = self.tray_prefs().get("updates", "notify")
+        return mode if mode in {m for _label, m in UPDATE_MODES} else "notify"
+
+    def on_update_mode(self, item, mode):
+        if self.updating or not item.get_active():
+            return
+        self.config = read_config()
+        self.config.setdefault("tray", {})["updates"] = mode
+        write_config(self.config)
+        if mode != "off" and self.release is None:
+            self.check_updates()
+
+    def find_kind(self):
+        kind = "manual"
+        if self.can_update():
+            try:
+                kind = self.daemon.install_kind(__file__)
+            except Exception:
+                pass
+        GLib.idle_add(self.set_kind, kind)
+
+    def set_kind(self, kind):
+        self.kind = kind
+        self.rebuild_menu()
+        self.refresh()
+        return False
+
+    def announce_new_version(self):
+        """After an update, the new tray says so (once)."""
+        version = self.version()
+        self.config = read_config()
+        prefs = self.config.setdefault("tray", {})
+        before = prefs.get("version")
+        if before != version and version != "?":
+            prefs["version"] = version
+            write_config(self.config)
+            parse = getattr(self.daemon, "version_tuple", lambda _v: None)
+            new, old = parse(version), parse(before) if before else None
+            if new and old and new > old:
+                ask(f"Discord Presence updated to {version}", f"You were on {before}.",
+                    [("notes", "What's new")],
+                    lambda _choice: open_path(self.release_page()),
+                    icon="software-update-available")
+        return False
+
+    def first_update_check(self):
+        self.check_updates()
+        GLib.timeout_add_seconds(UPDATE_EVERY, self.timed_update_check)
+        return False
+
+    def timed_update_check(self):
+        self.check_updates()
+        return True
+
+    def check_updates(self, manual=False):
+        if self.update_busy or not self.can_update():
+            return
+        if not manual and self.update_mode() == "off":
+            return
+        self.update_busy = "checking"
+        self.rebuild_menu()
+        self.refresh()
+
+        def work():
+            try:
+                release, error = self.daemon.latest_release(), None
+            except Exception as problem:  # offline, rate limited, bad JSON
+                release, error = None, problem
+            GLib.idle_add(self.on_checked, release, error, manual)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_checked(self, release, error, manual):
+        self.update_busy = None
+        newer = release if release and self.daemon.is_newer(release, self.version()) else None
+        self.release = newer
+        self.rebuild_menu()
+        self.refresh()
+        if error is not None:
+            if manual:
+                notify(f"Could not check for updates: {error}")
+            return False
+        if not newer:
+            if manual:
+                notify(f"You are on the latest version ({self.version()}).")
+            return False
+
+        kind = self.kind or "manual"
+        if self.update_mode() == "auto" and kind in self.self_updating():
+            self.start_update()
+            return False
+        prefs = self.tray_prefs()
+        if not manual and prefs.get("update_notified") == newer["version"]:
+            return False  # already told about this one; the menu item stays
+        self.config = read_config()
+        self.config.setdefault("tray", {})["update_notified"] = newer["version"]
+        write_config(self.config)
+
+        body = release_summary(newer["notes"]) or newer["name"]
+        actions = [("notes", "What's new")]
+        if kind == "manual":
+            body += "\nThis copy is not managed by the installer: get it from the release page."
+        else:
+            actions.insert(0, ("update", "Update now"))
+        ask(f"Discord Presence {newer['version']} is out", body, actions,
+            self.on_update_choice, icon="software-update-available")
+        return False
+
+    def on_update_choice(self, choice):
+        if choice == "update":
+            self.start_update()
+        elif choice == "notes":
+            open_path(self.release_page())
+        return False
+
+    def start_update(self):
+        release = self.release
+        if not release or self.update_busy:
+            return
+        if (self.kind or "manual") == "manual":
+            open_path(release["page"])
+            return
+        self.update_busy = "installing"
+        self.rebuild_menu()
+
+        def work():
+            try:
+                self.daemon.install_update(release, self.kind, __file__)
+                error = None
+            except Exception as problem:  # UpdateError says why; anything else too
+                error = problem
+            GLib.idle_add(self.on_updated, release, error)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_updated(self, release, error):
+        if error is not None:
+            self.update_busy = None
+            self.rebuild_menu()
+            ask("Discord Presence update failed", str(error),
+                [("notes", "Open the release page")],
+                lambda _choice: open_path(release["page"]),
+                icon="dialog-error")
+            return False
+        # the new tray announces itself (announce_new_version), so just restart
+        try:
+            self.daemon.restart_services(tray=False)
+        except Exception:
+            pass
+        self.restart_tray()
+        return False
+
+    def restart_tray(self):
+        """Hand over to the new tray: through systemd when it started us."""
+        unit = systemctl("show", "-p", "MainPID", "--value", TRAY_SERVICE).stdout.strip()
+        if unit == str(os.getpid()):
+            systemctl("--no-block", "restart", TRAY_SERVICE)
+            return
+        if os.environ.get("APPIMAGE"):
+            os.execv(os.environ["APPIMAGE"], [os.environ["APPIMAGE"], "tray"])
+        os.execv(sys.executable, [sys.executable, str(pathlib.Path(__file__).resolve())]
+                 + sys.argv[1:])
 
     # ------------------------------------------------------------- actions
     def on_toggle_service(self, *_):

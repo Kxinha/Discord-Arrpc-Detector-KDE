@@ -123,7 +123,7 @@ o arquivo de configuração e com o próprio catálogo do daemon.
 | Menu | O que faz |
 |---|---|
 | **Daemon: running/stopped** | estado do serviço, no topo |
-| **Detected now:** | o que está sendo detectado neste instante |
+| **Showing now:** | o que está sendo publicado neste instante |
 | **Apps Discord can see** | liga e desliga cada app do catálogo; marca com `• detected` o que está aberto agora |
 | ↳ **Add a running app** | varre os processos abertos, cruza com a base de jogos detectáveis do Discord e adiciona o que reconhecer, em um clique, com o Application ID e o ícone certos. Usa as mesmas regras do arRPC (pedaços do caminho, entradas de launcher ignoradas, argumentos exigidos), com duas proteções a mais: um nome que vários jogos usam (`game.exe`, `client.exe`) só vale se um pedaço maior do caminho desempatar, e jogos nativos (`Unturned.x86_64`) casam com o `.exe` da base quando o nome é de um jogo só. Wrappers do Proton e processos do Wine (`explorer.exe`, `services.exe`) nunca viram sugestão |
 | ↳ **Remove an app I added** | tira do catálogo o que você adicionou |
@@ -136,6 +136,8 @@ o arquivo de configuração e com o próprio catálogo do daemon.
 | **Daemon → Clear stuck presence** | manda o Discord apagar qualquer presença pendurada |
 | **Daemon → Reload catalog / View log** | recarrega o catálogo; abre o journal em um terminal |
 | **Configuration** | mostra o caminho do JSON, abre o arquivo, abre a pasta, copia o caminho |
+| **⬆ Update to X** | aparece no topo quando sai versão nova; um clique baixa, confere e instala |
+| **Updates** | versão instalada e o tipo de instalação, **Check for updates now**, o modo (instalar sozinho, só avisar, nunca procurar) e **Release notes** |
 | **Start/Stop/Restart daemon**, **Quit tray** | controle direto |
 
 O ícone fica **acinzentado quando o daemon está parado** e colorido quando
@@ -144,6 +146,33 @@ ficam em `"tray"` dentro do mesmo `~/.config/discord-game-presence.json`.
 
 Ele roda pelo serviço `discord-game-presence-tray.service`, ligado à sessão
 gráfica. Para instalar sem a bandeja: `SKIP_TRAY=1 ./install.sh`.
+
+### Atualizações
+
+A bandeja olha a última release do GitHub 45 s depois de abrir e depois a cada
+6 h. Quando sai uma versão nova, chega uma **notificação** com os botões
+**Update now** e **What's new**, uma vez por versão, e o item **⬆ Update to X**
+fica no menu até você atualizar. Depois da troca, a bandeja nova avisa
+"updated to X".
+
+O que é baixado depende de como você instalou, e o menu **Updates** mostra qual
+é o seu caso:
+
+| Instalação | Como atualiza |
+|---|---|
+| `install.sh` (`~/.local/bin`) | baixa os dois scripts e as units, guarda os antigos em `~/.local/share/discord-game-presence/backup/<versão>/`, troca e reinicia daemon e bandeja. Sem senha |
+| pacote `.pkg.tar.zst`, `.deb`, `.rpm` | baixa o pacote da release e instala com `pkexec` (a janela de senha do sistema) |
+| AppImage | troca o arquivo `.AppImage` pelo novo |
+| clone do git ou cópia à mão | só avisa e abre a página da release; nunca sobrescreve |
+
+Nada é instalado sem conferir o **sha256** que o GitHub publica para cada
+arquivo da release (ou o `SHA256SUMS` anexado). Um arquivo que não bate, um
+daemon que não é da versão anunciada ou um script que não compila cancelam a
+troca sem mexer no que está instalado. **Install updates automatically** só
+vale para script e AppImage, que não pedem senha.
+
+Pelo terminal: `discord-game-presence --check-update` e
+`discord-game-presence --update`.
 
 ---
 
@@ -415,10 +444,12 @@ artista + título no caso do YouTube Music.
 
 ## Limites conhecidos
 
-- **O `type` pode ser ignorado.** A documentação atual do Discord aceita `2`
-  (Ouvindo) e `3` (Assistindo) no `SET_ACTIVITY`, e o Vesktop repassa o pedido
-  ao RPC do próprio Discord, mas versões antigas respondiam com `type: 0`
-  ("Jogando"). Os links e o `status_display` caem fora sozinhos nesses casos.
+- **Ouvindo e Assistindo dependem do cliente.** Conferido em 2026-11-17 no
+  Vesktop 1.6.9: a resposta do Discord ao `SET_ACTIVITY` devolveu `type` 3
+  (YouTube) e 2 (YouTube Music), com `details_url`, `state_url`, `large_url` e
+  `status_display_type` intactos. Clientes antigos respondiam com `type: 0`
+  ("Jogando") ou recusavam os campos novos; nesse caso a presença sai sem os
+  links, sozinha.
 - **Botões não aparecem para você mesmo**, só para quem vê seu perfil.
 - **Stremio não publica posição**, então não há progresso real do episódio — o
   cronômetro reinicia a cada título novo.
@@ -497,7 +528,7 @@ packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /us
 ### Testes
 
 ```bash
-python3 -m unittest discover -s tests          # regras, YouTube, abas do Chrome, IPC, base do Discord, Minecraft
+python3 -m unittest discover -s tests          # regras, YouTube, abas do Chrome, IPC, atualização, Minecraft
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
       --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
       python3 tests/e2e_fake_discord.py        # o daemon inteiro contra um Discord falso
@@ -518,3 +549,9 @@ packaging/build.sh rpm deb      # só alguns formatos
 Sai em `dist/`. Não precisa de root, e a máquina que constrói não precisa ser
 da mesma distro do pacote — `.rpm`, `.deb` e o do pacman são árvores de
 arquivos com metadados. O `.AppImage` baixa o `appimagetool` na primeira vez.
+
+`dist/` também recebe os arquivos da instalação por script
+(`discord-game-presence.py`, `discord-presence-tray.py` e as duas units) e o
+`SHA256SUMS` de tudo. **Anexe todo o `dist/` à release** do GitHub, com a tag
+`vX.Y.Z` e a mesma versão em `VERSION` no daemon: é de lá que a atualização
+pela bandeja baixa cada tipo de instalação.

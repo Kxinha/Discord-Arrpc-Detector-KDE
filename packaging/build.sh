@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Constroi os pacotes em dist/: .rpm, .deb, .pkg.tar.zst (Arch) e .AppImage.
+# Constroi os pacotes em dist/: .rpm, .deb, .pkg.tar.zst (Arch), .AppImage e
+# os arquivos soltos da instalacao por script, mais o SHA256SUMS de tudo.
 #
 #   packaging/build.sh            constroi tudo o que a maquina permitir
 #   packaging/build.sh rpm deb    so os formatos pedidos
+#
+# Tudo o que sai em dist/ vai anexado a release do GitHub: a atualizacao pela
+# bandeja baixa daqui o arquivo da instalacao de cada um (os scripts e units,
+# ou o pacote) e confere o sha256 antes de trocar qualquer coisa.
 #
 # Nada aqui precisa de root, e a maquina que constroi nao precisa ser a mesma
 # distro do pacote: rpm/deb/arch sao so arvores de arquivos com metadados.
@@ -198,12 +203,28 @@ build_appimage() {
         || { warn "appimagetool falhou"; return; }
 }
 
+# ----------------------------------------------------------------- files
+# A instalacao por script (install.sh) se atualiza com estes quatro arquivos:
+# os nomes sao os que o daemon procura na release (SCRIPT_FILES).
+build_files() {
+    msg "copiando os arquivos da instalacao por script"
+    mkdir -p "$DIST"
+    install -m755 "$ROOT/discord-game-presence.py" "$ROOT/discord-presence-tray.py" "$DIST/"
+    install -m644 "$ROOT/systemd/$PKGNAME.service" "$ROOT/systemd/$PKGNAME-tray.service" "$DIST/"
+}
+
+write_sums() {
+    ( cd "$DIST" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort \
+        | xargs -r sha256sum > SHA256SUMS )
+}
+
 main() {
     local targets=("$@")
-    [ ${#targets[@]} -gt 0 ] || targets=(rpm deb arch appimage)
+    [ ${#targets[@]} -gt 0 ] || targets=(files rpm deb arch appimage)
     mkdir -p "$DIST"
     for target in "${targets[@]}"; do
         case "$target" in
+            files) build_files ;;
             rpm) build_rpm ;;
             deb) build_deb ;;
             arch) build_arch ;;
@@ -211,6 +232,7 @@ main() {
             *) warn "formato desconhecido: $target" ;;
         esac
     done
+    write_sums
     msg "pacotes em $DIST:"
     ls -lh "$DIST" | tail -n +2 | awk '{printf "    %-52s %s\n", $9, $5}'
     post_install_note

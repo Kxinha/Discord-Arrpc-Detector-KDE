@@ -9,13 +9,18 @@ Discord direto e publica a presenca enquanto o jogo estiver aberto.
     discord-game-presence            roda o daemon
     discord-game-presence --scan     mostra o que seria detectado agora, e por que
     discord-game-presence --version
+    discord-game-presence --check-update   diz se saiu versao nova
+    discord-game-presence --update         instala a versao nova (sha256 conferido)
 """
+import fcntl
 import glob
 import gzip
+import hashlib
 import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -2908,6 +2913,298 @@ def active_games():
             if game.get("client_id") and game.get("enabled", True)]
 
 
+# ------------------------------------------------------------- atualizacao
+# A bandeja avisa quando sai uma release nova no GitHub e instala com um
+# clique. O que se baixa depende de como esta copia foi instalada: os scripts
+# e as units (install.sh), o pacote da distro (pkexec, porque e root) ou o
+# AppImage. Nada e trocado sem conferir o sha256 que o GitHub publica para cada
+# arquivo da release (campo "digest"), ou o SHA256SUMS anexado a ela.
+REPO = "gabrielmf1998/Discord-Arrpc-Detector-KDE"
+RELEASES_API = (os.environ.get("DGP_RELEASES_API")
+                or f"https://api.github.com/repos/{REPO}/releases/latest")
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
+UPDATE_DIR = pathlib.Path(os.environ.get("XDG_CACHE_HOME")
+                          or pathlib.Path.home() / ".cache") / "discord-game-presence" / "update"
+UPDATE_LIMIT = 64 << 20  # nenhum arquivo da release chega perto disso
+SCRIPT_FILES = {  # arquivo da release -> lugar dele numa instalacao por script
+    "discord-game-presence.py": ".local/bin/discord-game-presence.py",
+    "discord-presence-tray.py": ".local/bin/discord-presence-tray.py",
+    "discord-game-presence.service": ".config/systemd/user/discord-game-presence.service",
+    "discord-game-presence-tray.service": ".config/systemd/user/discord-game-presence-tray.service",
+}
+SCRIPT_REQUIRED = ("discord-game-presence.py", "discord-presence-tray.py")
+PACKAGE_ASSETS = {
+    "pacman": r"discord-game-presence-{v}-\d+-any\.pkg\.tar\.zst",
+    "deb": r"discord-game-presence_{v}-\d+_all\.deb",
+    "rpm": r"discord-game-presence-{v}-\d+\.noarch\.rpm",
+    "appimage": r"DiscordPresence-{v}-x86_64\.AppImage",
+}
+SELF_UPDATING = ("script", "appimage")  # instalam sem pedir senha
+DAEMON_SERVICE = "discord-game-presence.service"
+TRAY_SERVICE = "discord-game-presence-tray.service"
+
+
+class UpdateError(Exception):
+    """Atualizacao que nao deu para fazer, com o motivo (em ingles, vai para a bandeja)."""
+
+
+def version_tuple(text):
+    m = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?", (text or "").strip())
+    return tuple(int(part or 0) for part in m.groups()) if m else None
+
+
+def is_newer(release, current=VERSION):
+    found = version_tuple(release["version"]) if release else None
+    return bool(found) and found > (version_tuple(current) or (0,))
+
+
+def _fetch(url, timeout, accept=None):
+    headers = {"User-Agent": f"discord-game-presence/{VERSION}"}
+    if accept:
+        headers["Accept"] = accept
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                  timeout=timeout)
+
+
+def latest_release(timeout=20):
+    """A ultima release publicada (rascunho e pre-release nao contam), ou None."""
+    with _fetch(RELEASES_API, timeout, "application/vnd.github+json") as response:
+        data = json.loads(response.read(4 << 20))
+    if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
+        return None
+    tag = str(data.get("tag_name") or "")
+    if not version_tuple(tag):
+        return None
+    assets = {}
+    for asset in data.get("assets") or []:
+        if not isinstance(asset, dict) or not asset.get("name") or not asset.get("browser_download_url"):
+            continue
+        if asset.get("state", "uploaded") != "uploaded":
+            continue  # o gh ainda esta subindo esse arquivo
+        digest = str(asset.get("digest") or "").lower()
+        assets[asset["name"]] = {
+            "url": asset["browser_download_url"],
+            "sha256": digest[7:] if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) else None}
+    return {"version": tag.lstrip("v"), "tag": tag, "name": data.get("name") or tag,
+            "page": data.get("html_url") or RELEASES_PAGE,
+            "notes": str(data.get("body") or ""), "assets": assets}
+
+
+def install_kind(path=None):
+    """Como esta copia foi instalada: script, pacman, deb, rpm, appimage ou manual.
+
+    Manual e qualquer outra coisa (um clone do git, um link para ele): essa
+    copia so e avisada, nunca sobrescrita.
+    """
+    path = pathlib.Path(path or __file__).resolve()
+    appdir = os.environ.get("APPDIR")
+    if os.environ.get("APPIMAGE") and appdir and str(path).startswith(appdir.rstrip("/") + "/"):
+        return "appimage"
+    if path.parent == (pathlib.Path.home() / ".local/bin").resolve():
+        return "script"
+    if str(path).startswith("/usr/"):
+        for kind, command in (("pacman", ["pacman", "-Qqo"]), ("deb", ["dpkg-query", "-S"]),
+                              ("rpm", ["rpm", "-qf"])):
+            if not shutil.which(command[0]):
+                continue
+            try:
+                done = subprocess.run(command + [str(path)], capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if done.returncode == 0:
+                return kind
+    return "manual"
+
+
+def update_files(release, kind):
+    """{nome: arquivo da release} do que esta instalacao precisa baixar."""
+    assets = release["assets"]
+    if kind == "script":
+        missing = [name for name in SCRIPT_REQUIRED if name not in assets]
+        if missing:
+            raise UpdateError("the release has no " + " or ".join(missing))
+        return {name: assets[name] for name in SCRIPT_FILES if name in assets}
+    pattern = PACKAGE_ASSETS.get(kind)
+    if not pattern:
+        raise UpdateError("this copy was not installed by the installer or a package; "
+                          "download it from the release page")
+    wanted = re.compile(pattern.format(v=re.escape(release["version"])))
+    found = sorted(name for name in assets if wanted.fullmatch(name))
+    if not found:
+        raise UpdateError(f"the release has no {kind} package")
+    return {found[-1]: assets[found[-1]]}
+
+
+def release_sums(release, timeout=20):
+    """O SHA256SUMS da release, para arquivo sem o digest do GitHub."""
+    info = release["assets"].get("SHA256SUMS")
+    if not info:
+        return {}
+    with _fetch(info["url"], timeout) as response:
+        text = response.read(1 << 20).decode("utf-8", "replace")
+    sums = {}
+    for line in text.splitlines():
+        m = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?(\S+)", line.strip())
+        if m:
+            sums[m.group(2)] = m.group(1).lower()
+    return sums
+
+
+def download_checked(url, dest, expected, limit=UPDATE_LIMIT, timeout=60):
+    digest, total = hashlib.sha256(), 0
+    with _fetch(url, timeout) as response, open(dest, "wb") as out:
+        while True:
+            chunk = response.read(1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise UpdateError(f"{dest.name} is larger than any release file should be")
+            digest.update(chunk)
+            out.write(chunk)
+    if digest.hexdigest() != expected:
+        raise UpdateError(f"{dest.name} failed the sha256 check; nothing was changed")
+
+
+def _install_script(release, staged, home=None):
+    """Troca os arquivos de uma instalacao por script, guardando os antigos."""
+    home = pathlib.Path(home or pathlib.Path.home())
+    source = staged["discord-game-presence.py"].read_text(encoding="utf-8", errors="replace")
+    m = re.search(r'^VERSION = "([^"]+)"$', source, re.M)
+    if not m or m.group(1) != release["version"]:
+        raise UpdateError(f"the downloaded daemon is not version {release['version']}")
+    for name in SCRIPT_REQUIRED:
+        try:
+            compile(staged[name].read_bytes(), name, "exec")
+        except (SyntaxError, ValueError) as error:
+            raise UpdateError(f"{name} does not compile: {error}") from None
+    backup = home / ".local/share/discord-game-presence/backup" / VERSION
+    backup.mkdir(parents=True, exist_ok=True)
+    units = False
+    for name, src in staged.items():
+        dest = home / SCRIPT_FILES[name]
+        if dest.exists():
+            shutil.copy2(dest, backup / name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fresh = dest.with_name(dest.name + ".new")
+        shutil.copyfile(src, fresh)
+        os.chmod(fresh, 0o755 if name.endswith(".py") else 0o644)
+        os.replace(fresh, dest)  # quem esta rodando segue com o arquivo antigo
+        units = units or name.endswith(".service")
+    if units:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+
+
+def _install_appimage(staged):
+    target = pathlib.Path(os.environ["APPIMAGE"])
+    fresh = target.with_name(target.name + ".new")
+    try:
+        shutil.copyfile(next(iter(staged.values())), fresh)
+        os.chmod(fresh, 0o755)
+        os.replace(fresh, target)
+    except OSError as error:
+        raise UpdateError(f"could not replace {target}: {error.strerror}") from None
+
+
+def package_command(kind, package):
+    """O comando (sem o pkexec) que instala o pacote baixado."""
+    options = {
+        "pacman": [["pacman", "-U", "--noconfirm", package]],
+        "deb": [["apt-get", "install", "-y", package]],
+        "rpm": [["dnf", "install", "-y", package],
+                ["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", package],
+                ["rpm", "-U", package]],
+    }
+    for command in options.get(kind, []):
+        if shutil.which(command[0]):
+            return command
+    raise UpdateError(f"no {kind} package manager found")
+
+
+def _install_package(kind, package):
+    command = package_command(kind, str(package))
+    if not shutil.which("pkexec"):
+        raise UpdateError("pkexec is missing; install the package by hand: " + " ".join(command))
+    try:
+        done = subprocess.run(["pkexec"] + command, capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        raise UpdateError("the package manager took too long") from None
+    if done.returncode in (126, 127):  # janela de senha fechada ou negada
+        raise UpdateError("authorization was cancelled; nothing was changed")
+    if done.returncode:
+        tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or ["no output"]
+        raise UpdateError(f"{command[0]} failed: {tail[0][:200]}")
+
+
+def install_update(release, kind=None, path=None):
+    """Baixa, confere e instala a release. Nao reinicia nada (restart_services)."""
+    kind = kind or install_kind(path)
+    files = update_files(release, kind)
+    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(UPDATE_DIR / "lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise UpdateError("another update is already running") from None
+        work = UPDATE_DIR / release["version"]
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir()
+        try:
+            sums = (release_sums(release)
+                    if any(not info["sha256"] for info in files.values()) else {})
+            staged = {}
+            for name, info in files.items():
+                expected = info["sha256"] or sums.get(name)
+                if not expected:
+                    raise UpdateError(f"{name} has no published sha256; nothing was changed")
+                download_checked(info["url"], work / name, expected)
+                staged[name] = work / name
+            if kind == "script":
+                _install_script(release, staged)
+            elif kind == "appimage":
+                _install_appimage(staged)
+            else:
+                _install_package(kind, staged[next(iter(staged))])
+        except (OSError, urllib.error.URLError) as error:
+            raise UpdateError(f"download failed: {getattr(error, 'reason', error)}") from None
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    return kind
+
+
+def restart_services(tray=True):
+    """Reinicia o daemon (se estava rodando) e, se pedido, o servico da bandeja."""
+    def systemctl(*args):
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+    systemctl("daemon-reload")  # um pacote novo pode trazer units novas
+    if systemctl("is-active", DAEMON_SERVICE).stdout.strip() == "active":
+        systemctl("restart", DAEMON_SERVICE)
+    if tray and systemctl("is-active", TRAY_SERVICE).stdout.strip() == "active":
+        systemctl("--no-block", "restart", TRAY_SERVICE)
+
+
+def update_cli(install):
+    try:
+        release = latest_release()
+    except (OSError, ValueError) as error:
+        print(f"nao deu para consultar as releases: {error}")
+        return 1
+    if not is_newer(release):
+        print(f"{VERSION} e a versao mais nova")
+        return 0
+    print(f"{VERSION} -> {release['version']} disponivel: {release['page']}")
+    if not install:
+        return 0
+    try:
+        kind = install_update(release)
+    except UpdateError as error:
+        print(f"nao atualizou: {error}")
+        return 1
+    restart_services()
+    print(f"atualizado para {release['version']} ({kind})")
+    return 0
+
+
 def scan_report():
     """--scan: o que esta aberto agora, por qual processo, desde quando."""
     load_config()
@@ -2958,6 +3255,8 @@ def main():
     if "--scan" in sys.argv[1:]:
         print(scan_report())
         return
+    if "--check-update" in sys.argv[1:] or "--update" in sys.argv[1:]:
+        sys.exit(update_cli("--update" in sys.argv[1:]))
 
     load_config()
     active = active_games()

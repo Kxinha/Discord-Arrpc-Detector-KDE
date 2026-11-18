@@ -177,7 +177,8 @@ Instalar:
 O que o menu oferece (tudo em ingles):
 
   Daemon: running/stopped .... estado do servico
-  Detected now: ............... o que esta sendo detectado agora
+  Showing now: ................ o que esta sendo publicado agora
+  Update to X ................. aparece quando sai versao nova
   Apps Discord can see ........ liga/desliga cada app do catalogo
      Add a running app ........ varre os processos abertos, cruza com a
                                 base de jogos do Discord e adiciona o que
@@ -195,10 +196,23 @@ O que o menu oferece (tudo em ingles):
      Clear stuck presence ..... apaga presenca pendurada no Discord
      Reload catalog / View log
   Configuration .............. caminho do JSON, abrir arquivo/pasta, copiar
+  Updates
+     Check for updates now .... procura versao nova agora
+     Install automatically .... instala sozinho (so script e AppImage)
+     Notify me ................ avisa e espera o clique (o padrao)
+     Never check .............. nao procura
+     Release notes ............ abre a pagina da release
   Start / Restart / Quit
 
 O icone fica cinza quando o daemon esta parado e colorido quando roda.
 As preferencias da bandeja ficam no mesmo JSON, na chave "tray".
+
+Atualizacoes: a bandeja olha o GitHub 45 s depois de abrir e a cada 6 h.
+Versao nova vira uma notificacao com o botao "Update now". O sha256 de cada
+arquivo e conferido antes de trocar qualquer coisa. Instalacao por script
+troca os arquivos em ~/.local/bin (os antigos ficam em
+~/.local/share/discord-game-presence/backup); pacote instala com pkexec.
+Pelo terminal: discord-game-presence --check-update / --update
 
 Se a bandeja nao aparecer:
   - confira o servico:  systemctl --user status discord-game-presence-tray
