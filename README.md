@@ -572,8 +572,18 @@ processos é lida uma vez a cada 2 s e dividida entre todas, ~3 ms). Um app
 aberto é conferido a cada 2 s, então fechar o jogo tira a presença do perfil em
 cerca de 2 s; o texto da presença é atualizado no ritmo de cada app (5 a 15 s).
 Se o Discord estiver fechado ou o socket cair, a thread tenta de novo no ciclo
-seguinte. Se o Discord recusar uma atividade, o motivo vai para o log. O
-serviço tem `Restart=always`.
+seguinte. O serviço tem `Restart=always`.
+
+A conexão também é conferida enquanto nada muda. O Vesktop 1.6.9 fecha todas
+as conexões de Rich Presence quando a janela recarrega ("Renderer reloaded"), e
+ao sair ou reiniciar a conexão simplesmente acaba; antes, com o jogo parado no
+mesmo estado, a presença sumia do perfil até alguém reiniciar o daemon. Agora
+o fim da conexão, ou um socket novo no mesmo caminho, é notado em até 2 s e a
+presença volta em uns 7 s, sozinha. Se o Discord recusar uma atividade, o
+motivo vai para o log e ela é tentada de novo depois de 30 s, dobrando até
+10 min (o Vesktop também recusa por falha passageira, como "Request has been
+terminated"). E a mesma atividade é reenviada a cada 5 min, sem mudar nada
+para quem vê, para o caso de o cliente perdê-la sem avisar.
 
 O Discord mantém a última atividade publicada mesmo depois que a conexão
 morre — sem cuidado, fechar o app deixaria a presença pendurada com o
@@ -616,6 +626,7 @@ docs/config.exemplo.json                   modelo de configuração
 tests/test_detection.py                    testes (python3 -m unittest discover -s tests)
 tests/test_options.py                      níveis de detalhe, pausa, arquivo de estado, sugestões
 tests/test_update.py                       atualização contra um GitHub falso
+tests/test_link.py                         conexão que o Discord fecha ou troca, recusa passageira
 tests/e2e_fake_discord.py                  ponta a ponta com um Discord falso, isolado em bwrap
 tests/e2e_install.sh                       o instalador via curl | bash contra uma release local
 systemd/*.service                          units para instalação por usuário
@@ -639,7 +650,8 @@ O segundo roda o daemon de verdade contra um socket de IPC falso, sem ver o
 Discord real nem a rede, e confere a detecção, o tempo de jogo, a volta para a
 presença sem links quando o Discord recusa os campos novos, a presença
 apagada ao fechar, o arquivo de estado, a pausa, o nível `minimal` e o
-`SIGHUP`, que troca as opções sem reconectar.
+`SIGHUP`, que troca as opções sem reconectar, e a volta sozinha depois de o
+Discord fechar todas as conexões, como o Vesktop faz ao recarregar.
 
 O terceiro passa o `install.sh` pelo pipe, como o `curl`, contra uma release
 servida localmente, com `HOME` temporário e `systemctl`/`sudo` de mentira:

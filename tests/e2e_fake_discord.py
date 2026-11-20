@@ -51,6 +51,7 @@ class FakeDiscord:
         self.events = []  # (hora, client_id, activity)
         self.refused = []  # atividades com campos que este Discord nao conhece
         self.handshakes = []  # (hora, client_id): cada conexao nova
+        self.conns = []
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(path)
@@ -60,7 +61,20 @@ class FakeDiscord:
     def accept(self):
         while True:
             conn, _ = self.server.accept()
+            with self.lock:
+                self.conns.append(conn)
             threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    def close_all(self, message):
+        """O Vesktop 1.6.9 fecha todas as conexoes quando a janela recarrega."""
+        with self.lock:
+            conns, self.conns = self.conns, []
+        for conn in conns:
+            try:
+                self.reply(conn, 2, {"code": 1000, "message": message})
+                conn.close()
+            except OSError:
+                pass
 
     @staticmethod
     def recv(conn, size):
@@ -267,6 +281,13 @@ def main():
               bool(full) and not new and daemon.poll() is None,
               (f"{full[0] - mark:.1f}s, " if full else "nao republicou, ")
               + f"{len(new)} conexao(oes) nova(s)")
+
+        # a janela do Vesktop recarrega: todas as conexoes caem, o jogo segue igual
+        mark = time.time()
+        discord.close_all("Renderer reloaded")
+        back = discord.wait(lambda e: e[1] == CLIENT and e[2] and e[0] > mark, 12)
+        check("volta sozinho quando o Discord fecha a conexao (Renderer reloaded)",
+              bool(back), f"{back[0] - mark:.1f}s" if back else "nao voltou")
         daemon.send_signal(signal.SIGTERM)
         logs.append(daemon.stdout.read())
         daemon.wait(timeout=10)

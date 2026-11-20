@@ -23,6 +23,7 @@ import math
 import os
 import pathlib
 import re
+import select
 import shutil
 import signal
 import socket
@@ -37,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -2557,6 +2558,15 @@ IPC_TIMEOUT = 15
 # o handshake de um app que acabou de reconectar pode demorar (o Discord segura
 # conexoes repetidas): desistir cedo so gerava outra conexao, e mais espera
 HANDSHAKE_TIMEOUT = 40
+# Reenvia a mesma atividade de tempos em tempos. Nao muda nada para quem ve
+# (o tempo e o mesmo), mas se o cliente perdeu a presenca sem fechar a
+# conexao, ela volta sozinha em vez de sumir ate o estado do jogo mudar.
+REASSERT = 300
+# Uma atividade recusada e tentada de novo depois disso, dobrando ate o teto:
+# o Vesktop recusa por falha passageira ("Request has been terminated")
+# tambem, e antes a presenca ficava fora ate o estado do jogo mudar.
+REFUSED_RETRY = 30
+REFUSED_RETRY_MAX = 600
 
 # Avisa as sessoes que e hora de sair. Sem isso o processo morria com as
 # conexoes abertas e o cliente continuava exibindo a ultima atividade: quem
@@ -2702,6 +2712,8 @@ def send(sock, op, payload):
         if rop == 3:
             sock.sendall(struct.pack("<II", 4, len(raw)) + raw)
             continue
+        if rop == 4:
+            continue  # PONG nao e a resposta do comando
         if not isinstance(body, dict):
             continue
         if body.get("evt") == "ERROR":
@@ -2712,23 +2724,63 @@ def send(sock, op, payload):
     raise ConnectionError("Discord nao respondeu ao comando")
 
 
-def ipc_connect(client_id):
+def ipc_connect(client_id, link=None):
     """Conexao com handshake feito, no primeiro socket que aceitar, ou None.
 
     Um socket velho (de um Discord que caiu) recusa a conexao; antes isso
-    prendia o daemon nele, agora a busca segue para o proximo.
+    prendia o daemon nele, agora a busca segue para o proximo. Em `link` fica
+    qual socket aceitou e o inode dele, para check_link saber se o Discord do
+    outro lado foi trocado.
     """
     for path in ipc_candidates():
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(HANDSHAKE_TIMEOUT)  # sem isso um Discord mudo travaria a thread
         try:
             sock.connect(path)
+            ino = os.stat(path).st_ino
             send(sock, 0, {"v": 1, "client_id": client_id})
             sock.settimeout(IPC_TIMEOUT)
+            if link is not None:
+                link.update(path=path, ino=ino)
             return sock
         except (OSError, ConnectionError, ValueError, IPCError):
             sock.close()
     return None
+
+
+def check_link(sock, link=None):
+    """Confere, sem bloquear, se a conexao ainda leva a um Discord vivo.
+
+    O daemon so escreve quando a atividade muda, entao uma conexao morta
+    passava despercebida: o Vesktop 1.6.9 fecha todas as conexoes de RPC
+    quando a janela recarrega ("Renderer reloaded"), e ao sair ou reiniciar o
+    socket simplesmente acaba. A presenca sumia do perfil e o daemon seguia
+    achando que estava publicada. Aqui o que chegou sem ninguem pedir e lido:
+    CLOSE ou fim da conexao viram ConnectionError (a sessao cai e reconecta),
+    PING recebe PONG, o resto e ignorado. Um socket trocado no mesmo caminho
+    (outro Vesktop subiu) tambem derruba a conexao velha.
+    """
+    if link and link.get("path"):
+        try:
+            if os.stat(link["path"]).st_ino != link["ino"]:
+                raise ConnectionError("o Discord reiniciou (socket novo)")
+        except FileNotFoundError:
+            pass  # o fim da conexao, se vier, aparece logo abaixo
+    for _ in range(50):
+        ready, _, _ = select.select([sock], [], [], 0)
+        if not ready:
+            return
+        rop, length = struct.unpack("<II", recv_exact(sock, 8))
+        raw = recv_exact(sock, length) if length else b""
+        if rop == 2:
+            try:
+                body = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                body = {}
+            body = body if isinstance(body, dict) else {}
+            raise ConnectionError(f"Discord fechou: {body.get('code')} {body.get('message')}")
+        if rop == 3:
+            sock.sendall(struct.pack("<II", 4, len(raw)) + raw)
 
 
 def clean_text(value, limit=128):
@@ -2968,17 +3020,22 @@ def session(key, game):
     first_state = current_state() if hit else None
     if first_state is None:
         return
-    sock = ipc_connect(game["client_id"])
+    link = {}
+    sock = ipc_connect(game["client_id"], link)
     if not sock:
         return
     opened = time.time()
+    sent = [time.monotonic()]  # ultima vez que a atividade foi mandada
 
-    def publish(activity):
+    def publish(activity, again=False):
         send(sock, 1, {
             "cmd": "SET_ACTIVITY",
             "args": {"pid": os.getpid(), "activity": activity},
             "nonce": str(time.time()),
         })
+        sent[0] = time.monotonic()
+        if again:
+            return  # a mesma de antes, so reafirmada: nao enche o log
         times = activity.get("timestamps") or {}
         if "end" in times:
             marca = (f" [{duration_label((time.time() - times['start']) * 1_000_000)}"
@@ -2992,6 +3049,7 @@ def session(key, game):
         status_showing(key, game, activity)
 
     published, refused, missing, legacy = None, None, None, False
+    retry_at, retry_wait, closed = 0.0, REFUSED_RETRY, False
     state, next_state = first_state, time.monotonic() + poll
     try:
         while True:
@@ -3004,10 +3062,14 @@ def session(key, game):
             else:
                 missing = None
                 activity = build_activity(game, state, hit_start(hit) or opened)
-                if not same_activity(published, activity) and activity != refused:
+                now = time.monotonic()
+                changed = not same_activity(published, activity)
+                due = published is not None and now - sent[0] >= REASSERT
+                if (changed or due) and (activity != refused or now >= retry_at):
                     try:
-                        publish(legacy_activity(activity) if legacy else activity)
-                        published = activity
+                        publish(legacy_activity(activity) if legacy else activity,
+                                again=not changed)
+                        published, refused, retry_wait = activity, None, REFUSED_RETRY
                     except IPCError as error:
                         plain, reason = legacy_activity(activity), error
                         if not legacy and plain != activity:
@@ -3018,13 +3080,21 @@ def session(key, game):
                             except IPCError as again:
                                 reason = again
                         if reason is not None:
-                            refused = activity  # nao insiste na mesma atividade recusada
-                            log(f"o Discord recusou {game['large_text']}: {reason}")
+                            # tenta de novo mais tarde, cada vez esperando mais
+                            refused, retry_at = activity, time.monotonic() + retry_wait
+                            log(f"o Discord recusou {game['large_text']}: {reason} "
+                                f"(nova tentativa em {retry_wait} s)")
+                            retry_wait = min(retry_wait * 2, REFUSED_RETRY_MAX)
             # Confere a cada poucos segundos se o app continua aberto, e so
             # rele o estado no ritmo dele: fechar o jogo tirava a presenca do
             # perfil so na volta seguinte, ate 15 s depois.
             reloads = RELOADS[0]
             while not STOPPING.wait(ALIVE_CHECK):
+                try:
+                    check_link(sock, link)
+                except (OSError, ConnectionError, ValueError):
+                    closed = True  # nao ha mais onde apagar: o outro lado ja foi
+                    raise
                 hit = detect(key, game)
                 if not hit:
                     state = None
@@ -3038,17 +3108,20 @@ def session(key, game):
                 break
     finally:
         cleared = False
-        try:
-            send(sock, 1, {"cmd": "SET_ACTIVITY",
-                           "args": {"pid": os.getpid(), "activity": None},
-                           "nonce": str(time.time())})
-            cleared = True
-            if published:
-                log(f"apagou {game['large_text']}")
-        except (OSError, ValueError, ConnectionError, IPCError) as error:
-            log(f"nao consegui apagar {game['large_text']}: {error}")
+        if not closed:
+            try:
+                send(sock, 1, {"cmd": "SET_ACTIVITY",
+                               "args": {"pid": os.getpid(), "activity": None},
+                               "nonce": str(time.time())})
+                cleared = True
+                if published:
+                    log(f"apagou {game['large_text']}")
+            except (OSError, ValueError, ConnectionError, IPCError) as error:
+                log(f"nao consegui apagar {game['large_text']}: {error}")
         sock.close()
-        status_showing(key, game, stale=bool(published) and not cleared)
+        # fechada pelo outro lado, a presenca ja saiu junto: o Vesktop passa o
+        # fim da conexao para o servidor de RPC do proprio Discord, que apaga
+        status_showing(key, game, stale=bool(published) and not cleared and not closed)
 
 
 def watch(key, game):
