@@ -1,6 +1,6 @@
 pkgbase = discord-arrpc-detector-kde
 	pkgdesc = Discord Rich Presence for Linux games and browser media Discord ignores, with a tray icon
-	pkgver = 1.5.0
+	pkgver = 1.5.1
 	pkgrel = 1
 	url = https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE
 	arch = any
@@ -14,7 +14,7 @@ pkgbase = discord-arrpc-detector-kde
 	optdepends = libnotify: tray notifications
 	optdepends = vesktop: Discord client with the Rich Presence socket
 	conflicts = discord-game-presence
-	source = discord-arrpc-detector-kde-1.5.0.tar.gz::https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/archive/refs/tags/v1.5.0.tar.gz
-	sha256sums = d8bdd64492471505ce453fabfda53ffa1795643e704727dbed96fce830ff51a0
+	source = discord-arrpc-detector-kde-1.5.1.tar.gz::https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/archive/refs/tags/v1.5.1.tar.gz
+	sha256sums = 1624548820ec0d0b774acf878908d471795c9c342079706a924f46105b4aead6
 
 pkgname = discord-arrpc-detector-kde

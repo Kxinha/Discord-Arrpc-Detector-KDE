@@ -1,7 +1,7 @@
 # Maintainer: gabrielmf1998 <https://github.com/gabrielmf1998>
 pkgname=discord-arrpc-detector-kde
 _pkgbin=discord-game-presence
-pkgver=1.5.0
+pkgver=1.5.1
 pkgrel=1
 pkgdesc="Discord Rich Presence for Linux games and browser media Discord ignores, with a tray icon"
 arch=('any')
@@ -15,7 +15,7 @@ optdepends=('libayatana-appindicator: tray icon'
 # same file names as the unrelated AUR package "discord-game-presence"
 conflicts=('discord-game-presence')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('d8bdd64492471505ce453fabfda53ffa1795643e704727dbed96fce830ff51a0')
+sha256sums=('1624548820ec0d0b774acf878908d471795c9c342079706a924f46105b4aead6')
 
 check() {
     cd "Discord-Arrpc-Detector-KDE-$pkgver"
