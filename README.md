@@ -204,7 +204,8 @@ project adds **what is happening in the match**, using Valve's official
 * only `provider`, `map`, `round`, `player_id` and `player_match_stats` are
   requested.
 
-CS2 reads that file when it starts, so the first time **restart CS2** once.
+CS2 reads that file when it starts. The daemon writes it as soon as it
+starts, so if CS2 was already open at that moment, restart CS2 once.
 The presence uses CS2's own Application ID, so Discord merges it with the
 "Playing Counter-Strike 2" that Vesktop already shows instead of listing the
 game twice. Another port: `DGP_CS2_PORT=...` in the service environment.

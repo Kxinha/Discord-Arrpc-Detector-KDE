@@ -4,6 +4,12 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.1
+
+Counter-Strike 2: the Game State Integration file is now written when the daemon starts, so map and score show up the first time you open CS2 (1.5.0 only wrote it with the game already open, which meant opening CS2 twice).
+
+* O arquivo do CS2 agora é gravado quando o daemon inicia: mapa e placar já aparecem na primeira vez que você abre o jogo.
+
 ## 1.5.0
 
 Counter-Strike 2 with map and score, Twitch, Netflix, Crunchyroll and Spotify in the browser, your own apps from a window, and the tray now says when Discord is the problem.

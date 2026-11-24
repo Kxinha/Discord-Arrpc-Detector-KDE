@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -4272,6 +4272,10 @@ def main():
         return
     threads += [threading.Thread(target=watch, args=(key, game), daemon=True)
                 for key, game in active]
+    if any(key == "cs2" for key, _game in active):
+        # o CS2 so le o .cfg quando abre: gravado agora, ja vale na proxima
+        # vez que o jogo abrir, sem precisar abrir duas vezes
+        threading.Thread(target=cs2_install_cfg, daemon=True).start()
     log(f"{VERSION}: vigiando {len(threads)} app(s): "
         + ", ".join(sorted(game["large_text"] for _, game in active)))
     for thread in threads:

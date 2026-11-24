@@ -304,7 +304,8 @@ oficial da Valve:
   recusado;
 * só `provider`, `map`, `round`, `player_id` e `player_match_stats` são pedidos.
 
-O CS2 lê esse arquivo ao abrir, então na primeira vez **reabra o CS2**. A
+O CS2 lê esse arquivo ao abrir. O daemon grava assim que inicia; se o CS2 já
+estava aberto nessa hora, reabra o CS2 uma vez. A
 presença usa o Application ID do próprio CS2, para o Discord juntar com o
 "Jogando Counter-Strike 2" que o Vesktop já mostra em vez de listar o jogo duas
 vezes. Outra porta: `DGP_CS2_PORT=...` no ambiente do serviço.
