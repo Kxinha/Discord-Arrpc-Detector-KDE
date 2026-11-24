@@ -15,7 +15,7 @@ optdepends=('libayatana-appindicator: tray icon'
 # same file names as the unrelated AUR package "discord-game-presence"
 conflicts=('discord-game-presence')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('d8bdd64492471505ce453fabfda53ffa1795643e704727dbed96fce830ff51a0')
 
 check() {
     cd "Discord-Arrpc-Detector-KDE-$pkgver"
