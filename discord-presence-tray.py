@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tray icon for the Discord presence daemon.
 
-GTK3 + AppIndicator, no Qt and no windows: the menu is the whole interface.
+GTK3 + AppIndicator, no Qt. The menu is the interface; the only window is
+the one that takes an Application ID, since a menu cannot take text.
 It drives the systemd user service, decides which apps Discord gets to see,
 and keeps its own look in the same config file the daemon reads.
 """
@@ -55,14 +56,16 @@ DETAIL_CHOICES = [("Everything: title, cover, links, buttons", "full"),
 SHOW_CHOICES = [("Cover image", "thumbnail"), ("Links in the text", "links"),
                 ("Buttons", "buttons"), ("Timer and progress bar", "time")]
 # entries that play media; the daemon reads the same keys (MEDIA_DEFAULTS)
-MEDIA_KEYS = {"youtube": True, "youtube-music": True, "stremio": False}  # True: web
+# True: YouTube in a browser, "site": the other browser sites, False: a player app
+MEDIA_KEYS = {"youtube": True, "youtube-music": True, "stremio": False,
+              "twitch": "site", "netflix": "site", "crunchyroll": "site", "spotify": "site"}
 MEDIA_CHOICES = [("Show ads as \u201cAd\u201d", "show_ads"),
                  ("Show browsing (home, channel, search)", "show_browsing"),
                  ("Show what I search", "show_search")]
 PAUSE_MINUTES = [1, 5, 15, 30, 60]
 KIND_LABELS = {"script": "installer script", "pacman": "pacman package",
                "deb": ".deb package", "rpm": ".rpm package", "appimage": "AppImage",
-               "manual": "manual copy"}
+               "manual": "manual copy", "aur": "AUR package"}
 
 COLORS = [
     # Discord's own palette
@@ -394,6 +397,308 @@ def suggest_apps(daemon, known_ids, known_keys, refresh=False):
         return []
 
 
+# -------------------------------------------------------- Discord itself
+# Process names of the clients that offer the IPC socket, and how to turn
+# Rich Presence on in each. Vesktop is checked against its own settings
+# screen (Vesktop Settings, Miscellaneous, "Rich Presence", 1.6.9).
+DISCORD_CLIENTS = [
+    ("vesktop", "Vesktop", "In Vesktop open Settings, Vesktop Settings, and turn on "
+                           "“Rich Presence” under Miscellaneous. Then restart Vesktop."),
+    ("equibop", "Equibop", "In Equibop settings turn on “Rich Presence” (arRPC), "
+                           "then restart Equibop."),
+    ("legcord", "Legcord", "In Legcord settings turn on Rich Presence (arRPC), then restart it."),
+    ("armcord", "ArmCord", "In ArmCord settings turn on Rich Presence (arRPC), then restart it."),
+    ("webcord", "WebCord", "WebCord has no Rich Presence socket. Use Vesktop or the official "
+                           "Discord app."),
+    ("discordcanary", "Discord Canary", "Restart Discord Canary. If it still fails, open it "
+                                        "from a terminal and look for IPC errors."),
+    ("discordptb", "Discord PTB", "Restart Discord PTB."),
+    ("discord", "Discord", "Restart Discord. The Flatpak build also needs access to "
+                           "$XDG_RUNTIME_DIR (it has it by default)."),
+]
+NO_CLIENT_HELP = ("Open Discord or Vesktop. Rich Presence only works with the desktop app, "
+                  "not with discord.com in a browser.")
+DEVELOPER_PORTAL = "https://discord.com/developers/applications"
+APP_ID = re.compile(r"\d{17,21}")
+ISSUE_URL = PROJECT_URL + "/issues/new"
+REPORT_LINES = 25
+
+
+def discord_clients(daemon):
+    """Discord clients running now, as (name, help), most specific first."""
+    procs = []
+    if daemon and hasattr(daemon, "processes"):
+        try:
+            procs = daemon.processes()
+        except Exception:
+            procs = []
+    names = set()
+    for proc in procs:
+        names |= {n.lower() for n in getattr(proc, "names", ()) or ()}
+        names.add((getattr(proc, "comm", "") or "").lower())
+    return [(label, text) for key, label, text in DISCORD_CLIENTS if key in names]
+
+
+def discord_state(daemon):
+    """("ok"|"off"|"closed", short label, help text or None)."""
+    sockets = []
+    if daemon and hasattr(daemon, "ipc_candidates"):
+        try:
+            sockets = daemon.ipc_candidates()
+        except Exception:
+            sockets = []
+    clients = discord_clients(daemon)
+    if sockets:
+        name = clients[0][0] if clients else "Discord"
+        return "ok", f"Discord: {name} ready", None
+    if clients:
+        name, text = clients[0]
+        return "off", f"⚠  {name} has Rich Presence off", text
+    return "closed", "⚠  Discord not found", NO_CLIENT_HELP
+
+
+def os_release():
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            text = pathlib.Path(path).read_text()
+        except OSError:
+            continue
+        m = re.search(r'^PRETTY_NAME="?([^"\n]*)"?', text, re.M)
+        if m:
+            return m.group(1)
+    return "unknown"
+
+
+def clean_log(lines, names):
+    """Log lines without anything a person might not want to publish.
+
+    The daemon writes what it published ("publicou YouTube: <video title>")
+    and paths. Only the app name stays; titles, links, quoted text and the
+    home folder go.
+    """
+    home = str(HOME)
+    known = sorted({n for n in names if n}, key=len, reverse=True)
+    out = []
+    for line in lines:
+        line = line.rstrip()
+        if not line:
+            continue
+        m = re.search(r"\bpublicou (.*)$", line)
+        if m:
+            rest = m.group(1)
+            app = next((n for n in known if rest.startswith(n + ":") or rest == n), None)
+            line = line[:m.start()] + f"publicou {app or '(an app)'}: (text hidden)"
+        line = line.replace(home, "~")
+        line = re.sub(r"https?://\S+", "<link>", line)
+        line = re.sub(r"\"[^\"]*\"|'[^']*'|“[^”]*”", "\"…\"", line)
+        out.append(line[:300])
+    return out
+
+
+class AppWindow(Gtk.Window):
+    """Add a program of your own, or give a built-in entry its Application ID.
+
+    The one window the tray has: an Application ID has to be pasted, and a
+    menu cannot take text.
+    """
+
+    def __init__(self, tray, proc=None, entry=None, id_only=False, label=None):
+        super().__init__(title=(f"{label or proc}: set Application ID" if id_only
+                                else "Discord Presence: add an app"))
+        self.tray, self.proc, self.id_only, self.label = tray, proc, id_only, label
+        entry = entry or {}
+        self.set_default_size(520, -1)
+        self.set_border_width(14)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_icon_name("discord-game-presence")
+        self.found_icon = None
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        self.add(grid)
+        row = 0
+
+        def label(text, wrap=False, dim=False):
+            widget = Gtk.Label(label=text, xalign=0)
+            widget.set_line_wrap(wrap)
+            widget.set_max_width_chars(60)
+            if dim:
+                widget.get_style_context().add_class("dim-label")
+            return widget
+
+        intro = ("Discord shows the name of the application that owns the ID. Create one "
+                 "named like the app (“Twitch”, “My Game”) in the Developer "
+                 "Portal, then copy its Application ID from General Information.")
+        grid.attach(label(intro, wrap=True, dim=True), 0, row, 3, 1)
+        row += 1
+
+        if not id_only:
+            grid.attach(label("Program"), 0, row, 1, 1)
+            self.program = Gtk.ComboBoxText.new_with_entry()
+            for name in self.running_programs():
+                self.program.append_text(name)
+            self.program.get_child().set_text(entry.get("exe") or proc or "")
+            self.program.get_child().set_placeholder_text("process name, e.g. MyGame.exe")
+            self.program.set_hexpand(True)
+            self.program.connect("changed", lambda *_: self.check_running())
+            grid.attach(self.program, 1, row, 2, 1)
+            row += 1
+            self.running = label("", dim=True)
+            grid.attach(self.running, 1, row, 2, 1)
+            row += 1
+
+            grid.attach(label("Text on your profile"), 0, row, 1, 1)
+            self.details = Gtk.Entry(text=entry.get("details") or "")
+            self.details.set_placeholder_text("first line, e.g. the game name")
+            grid.attach(self.details, 1, row, 2, 1)
+            row += 1
+
+            grid.attach(label("Second line"), 0, row, 1, 1)
+            state = entry.get("state")
+            self.state = Gtk.Entry(text=state if isinstance(state, str) else "Playing")
+            grid.attach(self.state, 1, row, 2, 1)
+            row += 1
+
+        grid.attach(label("Application ID"), 0, row, 1, 1)
+        self.app_id = Gtk.Entry(text=entry.get("client_id") or "")
+        self.app_id.set_placeholder_text("17 to 21 digits")
+        self.app_id.set_width_chars(22)
+        self.app_id.set_hexpand(True)
+        self.app_id.connect("changed", lambda *_: self.on_id_changed())
+        grid.attach(self.app_id, 1, row, 1, 1)
+        portal = Gtk.Button(label="Open Developer Portal")
+        portal.connect("clicked", lambda *_: open_path(DEVELOPER_PORTAL))
+        grid.attach(portal, 2, row, 1, 1)
+        row += 1
+        self.id_info = label("", dim=True)
+        grid.attach(self.id_info, 1, row, 2, 1)
+        row += 1
+
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.destroy())
+        self.save = Gtk.Button(label="Save")
+        self.save.get_style_context().add_class("suggested-action")
+        self.save.connect("clicked", lambda *_: self.on_save())
+        buttons.pack_start(cancel, False, False, 0)
+        buttons.pack_start(self.save, False, False, 0)
+        grid.attach(buttons, 0, row, 3, 1)
+
+        self.lookup_serial = 0
+        self.on_id_changed()
+        if not id_only:
+            self.check_running()
+        self.show_all()
+
+    def running_programs(self):
+        """Programs open now that are worth naming: the user's own, not the
+        desktop's (anything a game, launcher or Wine starts)."""
+        daemon = self.tray.daemon
+        if not daemon or not hasattr(daemon, "processes"):
+            return []
+        system = getattr(daemon, "SYSTEM_PREFIXES", ("/usr/",))
+        names = set()
+        for proc in daemon.processes():
+            name = getattr(proc, "prog", "") or ""
+            exe = getattr(proc, "exe", "") or ""
+            if not name or name in getattr(daemon, "SHELL_NAMES", ()):
+                continue
+            if exe.startswith(system) and not name.lower().endswith(".exe"):
+                continue
+            names.add(name)
+        return sorted(names, key=str.lower)
+
+    def check_running(self):
+        name = self.program.get_child().get_text().strip()
+        daemon = self.tray.daemon
+        if not name or not daemon or not hasattr(daemon, "is_running"):
+            self.running.set_text("")
+            return
+        try:
+            hit = daemon.is_running(name, {"exe": name})
+        except Exception:
+            hit = False
+        self.running.set_text("Open right now" if hit else "Not open right now")
+
+    def on_id_changed(self):
+        value = self.app_id.get_text().strip()
+        self.found_icon = None
+        self.lookup_serial += 1
+        if not value:
+            self.id_info.set_text("")
+        elif not APP_ID.fullmatch(value):
+            self.id_info.set_text("An Application ID is only digits, 17 to 21 of them")
+        else:
+            self.id_info.set_text("Checking with Discord…")
+            serial = self.lookup_serial
+            threading.Thread(target=self.lookup, args=(value, serial), daemon=True).start()
+
+    def lookup(self, value, serial):
+        """Public application info: the name friends will see, and its icon."""
+        url = f"https://discord.com/api/v9/applications/{value}/rpc"
+        info, error = None, None
+        try:
+            import urllib.request
+            request = urllib.request.Request(url, headers={"User-Agent": "discord-game-presence"})
+            with urllib.request.urlopen(request, timeout=8) as reply:
+                info = json.loads(reply.read(1 << 16))
+        except Exception as exc:  # 404 for an unknown id, or no network
+            error = exc
+        GLib.idle_add(self.show_lookup, value, serial, info, error)
+
+    def show_lookup(self, value, serial, info, error):
+        if serial != self.lookup_serial:
+            return False
+        if isinstance(info, dict) and info.get("name"):
+            self.id_info.set_text(f"Friends will see: Playing {info['name']}")
+            if info.get("icon"):
+                self.found_icon = (f"https://cdn.discordapp.com/app-icons/{value}/"
+                                   f"{info['icon']}.png")
+        elif getattr(error, "code", None) == 404:
+            self.id_info.set_text("Discord does not know this Application ID")
+        else:
+            self.id_info.set_text("Could not check it now (offline?). It can still be saved.")
+        return False
+
+    def on_save(self):
+        app_id = self.app_id.get_text().strip()
+        if not APP_ID.fullmatch(app_id):
+            self.id_info.set_text("Paste the Application ID first")
+            return
+        config = read_config()
+        games = config.setdefault("games", {})
+        if self.id_only:
+            entry = games.setdefault(self.proc, {})
+            entry.update(client_id=app_id, enabled=True)
+            if self.found_icon and not entry.get("large_image"):
+                entry["large_image"] = self.found_icon
+            name = self.label or self.proc
+        else:
+            program = self.program.get_child().get_text().strip()
+            if not program:
+                self.running.set_text("Type or pick the program first")
+                return
+            details = self.details.get_text().strip() or program
+            entry = {"client_id": app_id, "exe": program, "details": details,
+                     "state": self.state.get_text().strip() or "Playing",
+                     "large_text": details, "enabled": True}
+            old = games.get(self.proc) if self.proc else None
+            if isinstance(old, dict):
+                entry = {**old, **entry}
+            if self.found_icon and not entry.get("large_image"):
+                entry["large_image"] = self.found_icon
+            if self.proc and self.proc != program:
+                games.pop(self.proc, None)
+            games[program] = entry
+            name = details
+        write_config(config)
+        restart_daemon()
+        notify(f"{name} saved. Discord will show it while it is open.")
+        self.tray.config = read_config()
+        self.tray.rebuild_menu()
+        self.tray.refresh()
+        self.destroy()
+
+
 class Tray:
     current = None  # the running tray, for refresh_soon() after a restart
 
@@ -487,6 +792,14 @@ class Tray:
         self.showing_item.set_sensitive(False)
         menu.append(self.showing_item)
 
+        self.discord_item = Gtk.MenuItem(label="Discord: checking…")
+        self.discord_item.set_sensitive(False)
+        menu.append(self.discord_item)
+        self.discord_fix = Gtk.MenuItem(label="How to fix this")
+        self.discord_fix.connect("activate", lambda *_: self.explain_discord())
+        menu.append(self.discord_fix)
+        self.discord_help = None
+
         if self.pause_until() is not None:
             resume = Gtk.MenuItem(label="▶  Resume presence")
             resume.connect("activate", lambda *_: self.resume())
@@ -537,6 +850,18 @@ class Tray:
         updates.set_submenu(self.build_updates_menu())
         menu.append(updates)
 
+        report = Gtk.MenuItem(label="Report a problem")
+        report_menu = Gtk.Menu()
+        for label, handler in (
+            ("Open an issue on GitHub (you review it first)", lambda *_: self.report_issue()),
+            ("Copy the report (for GitLab or a chat)", lambda *_: self.copy_report()),
+        ):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", handler)
+            report_menu.append(item)
+        report.set_submenu(report_menu)
+        menu.append(report)
+
         menu.append(Gtk.SeparatorMenuItem())
 
         self.toggle_item = Gtk.MenuItem(label="Start")
@@ -552,6 +877,7 @@ class Tray:
         menu.append(quit_item)
 
         menu.show_all()
+        self.discord_fix.set_visible(False)
         return menu
 
     # ------------------------------------------------------------ catalog
@@ -591,6 +917,14 @@ class Tray:
         self.app_items = {}
 
         for proc, label, game, custom in self.catalog():
+            if self.needs_id(game):
+                item = Gtk.MenuItem(label=f"{label}  (needs an Application ID)")
+                item.connect("activate", lambda _i, p=proc, g=game, l=label:
+                             self.open_app_window(p, g, id_only=True, label=l))
+                item.set_tooltip_text("Create a Discord application for it, then paste "
+                                      "its ID here")
+                menu.append(item)
+                continue
             item = Gtk.CheckMenuItem(label=label)
             item.set_active(self.app_enabled(proc, game))
             item.connect("toggled", self.on_app_toggled, proc)
@@ -599,6 +933,14 @@ class Tray:
             self.app_items[proc] = (item, label)
 
         menu.append(Gtk.SeparatorMenuItem())
+
+        own = Gtk.MenuItem(label="Add your own app…")
+        own.connect("activate", lambda *_: self.open_app_window())
+        menu.append(own)
+
+        edit = Gtk.MenuItem(label="Edit an app")
+        edit.set_submenu(self.build_edit_menu())
+        menu.append(edit)
 
         add = Gtk.MenuItem(label="Add a running app")
         add.set_submenu(self.build_add_menu())
@@ -642,6 +984,39 @@ class Tray:
 
         menu.show_all()
         return menu
+
+    def needs_id(self, game):
+        return bool(game.get("needs_id")) and not game.get("client_id")
+
+    def build_edit_menu(self):
+        """Apps whose ID or text the window can change: the ones you added
+        and the built-in entries that take your own Application ID."""
+        menu = Gtk.Menu()
+        found = False
+        for proc, label, game, custom in self.catalog():
+            if not (custom or (game.get("needs_id") and game.get("client_id"))):
+                continue
+            found = True
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _i, p=proc, g=game, c=custom, l=label:
+                         self.open_app_window(p, g, id_only=not c, label=l))
+            menu.append(item)
+        if not found:
+            empty = Gtk.MenuItem(label="Nothing to edit yet")
+            empty.set_sensitive(False)
+            menu.append(empty)
+        menu.show_all()
+        return menu
+
+    def open_app_window(self, proc=None, game=None, id_only=False, label=None):
+        window = getattr(self, "app_window", None)
+        if window is not None and window.get_visible():
+            window.present()
+            return
+        entry = dict((self.config.get("games") or {}).get(proc) or {}) if proc else {}
+        if game:
+            entry = {**{k: v for k, v in game.items() if isinstance(v, (str, bool))}, **entry}
+        self.app_window = AppWindow(self, proc, entry, id_only=id_only, label=label)
 
     def build_remove_menu(self):
         menu = Gtk.Menu()
@@ -721,6 +1096,8 @@ class Tray:
 
             if MEDIA_KEYS[proc]:
                 for label, name in MEDIA_CHOICES:
+                    if MEDIA_KEYS[proc] == "site" and name != "show_browsing":
+                        continue
                     item = Gtk.CheckMenuItem(label=label)
                     item.set_active(self.media_option(game, name))
                     item.connect("toggled", self.on_app_option, proc, name)
@@ -1094,9 +1471,11 @@ class Tray:
 
         body = release_summary(newer["notes"]) or newer["name"]
         actions = [("notes", "What's new")]
-        if kind == "manual":
+        if kind == "aur":
+            body += "\nInstalled from the AUR: update it with your AUR helper (yay, paru)."
+        elif kind == "manual":
             body += "\nThis copy is not managed by the installer: get it from the release page."
-        else:
+        if kind not in ("manual", "aur"):
             actions.insert(0, ("update", "Update now"))
         ask(f"Discord Presence {newer['version']} is out", body, actions,
             self.on_update_choice, icon="software-update-available")
@@ -1113,7 +1492,7 @@ class Tray:
         release = self.release
         if not release or self.update_busy:
             return
-        if (self.kind or "manual") == "manual":
+        if (self.kind or "manual") in ("manual", "aur"):
             open_path(release["page"])
             return
         self.update_busy = "installing"
@@ -1361,6 +1740,7 @@ class Tray:
             item.set_active(self.app_enabled(proc, games.get(proc, {})))
         self.updating = False
 
+        self.show_discord()
         self.apply_icon(active)
         reported = daemon_status(self.daemon) if active else None
         if reported is not None:
@@ -1369,6 +1749,69 @@ class Tray:
             self.scanning = True
             threading.Thread(target=self.scan, args=(active, paused), daemon=True).start()
         return True  # keep the timer alive
+
+    def show_discord(self):
+        kind, text, help_text = discord_state(self.daemon)
+        self.discord_item.set_label(text)
+        self.discord_help = help_text
+        self.discord_fix.set_visible(kind != "ok")
+
+    def explain_discord(self):
+        kind, text, help_text = discord_state(self.daemon)
+        if kind == "ok":
+            notify("Discord is open and taking Rich Presence.")
+        else:
+            notify(help_text or NO_CLIENT_HELP, title=text.strip("\u26a0 "))
+
+    def report_text(self, markdown=True):
+        """Version, system and the last log lines, cleaned (see clean_log)."""
+        kind, discord_text, _help = discord_state(self.daemon)
+        names = [label for _p, label, _g, _c in self.catalog()]
+        names += [g.get("large_text") for _p, _l, g, _c in self.catalog()]
+        try:
+            raw = run("journalctl", "--user", "-u", SERVICE, "-n", "200", "-o", "cat",
+                      "--no-pager", timeout=10).stdout.splitlines()
+        except (OSError, subprocess.TimeoutExpired):
+            raw = []
+        lines = clean_log(raw, names)[-REPORT_LINES:]
+        session = " ".join(filter(None, (os.environ.get("XDG_CURRENT_DESKTOP"),
+                                          os.environ.get("XDG_SESSION_TYPE"))))
+        environment = "\n".join([
+            f"- Distro: {os_release()}",
+            f"- Desktop: {session or 'unknown'}",
+            f"- {discord_text.strip(chr(0x26a0) + ' ')}",
+            f"- Install: {KIND_LABELS.get(self.kind, self.kind or 'unknown')}",
+            f"- Python: {sys.version.split()[0]}",
+            f"- Daemon: {'running' if service_active() else 'stopped'}",
+        ])
+        log = "\n".join(lines) or "(no log lines)"
+        return self.version(), environment, log
+
+    def report_issue(self):
+        import urllib.parse
+        version, environment, log = self.report_text()
+        while True:
+            query = urllib.parse.urlencode({"template": "bug_report.yml", "version": version,
+                                            "environment": environment, "logs": log})
+            if len(query) < 7000 or "\n" not in log:
+                break
+            log = log.split("\n", 1)[1]  # GitHub refuses very long links
+        open_path(f"{ISSUE_URL}?{query}")
+        notify("The issue opens in your browser with version, system and log filled in. "
+               "Nothing is sent until you press Create.")
+
+    def copy_report(self):
+        version, environment, log = self.report_text()
+        text = (f"Discord Presence {version}\n{environment}\n\nLast log lines:\n"
+                f"```\n{log}\n```\n")
+        for tool in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+            if shutil.which(tool[0]):
+                subprocess.run(tool, input=text, text=True)
+                notify("Report copied. Titles, links and paths were left out.")
+                return
+        path = CACHE / "report.txt"
+        path.write_text(text)
+        open_path(path)
 
     def refresh_soon(self, seconds=2):
         """One more repaint once a non-blocking start/stop has settled."""

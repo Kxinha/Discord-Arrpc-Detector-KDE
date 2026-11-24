@@ -1,0 +1,119 @@
+name: CI
+
+# Every push and pull request: unit tests on several Pythons, the daemon end to
+# end against a fake Discord, the curl | bash installer against a local release,
+# and every package built. A v* tag that passes all of it is published as the
+# GitHub release, with every file of dist/ and its SHA256SUMS: the tray's
+# updater downloads from there, so a release no longer depends on any one PC.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile
+        run: python -m py_compile discord-game-presence.py discord-presence-tray.py
+      - name: Unit tests (the tray ones skip without GTK)
+        run: python -m unittest discover -s tests -v
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: System Python with GTK, AppIndicator and bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-gi gir1.2-gtk-3.0 \
+            gir1.2-ayatanaappindicator3-0.1 bubblewrap
+          # Ubuntu 24.04 blocks unprivileged user namespaces, which bwrap needs
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Unit tests with the tray loaded
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+      - name: Daemon against a fake Discord (isolated)
+        run: |
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
+                --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
+                /usr/bin/python3 tests/e2e_fake_discord.py
+      - name: Installer as curl | bash (isolated)
+        run: |
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net \
+                --tmpfs /run/user/$(id -u) --tmpfs /tmp --die-with-parent \
+                bash tests/e2e_install.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shell scripts
+        run: |
+          bash -n install.sh packaging/build.sh tests/e2e_install.sh
+          sh -n packaging/appimage/AppRun
+          shellcheck -S error install.sh packaging/build.sh
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm libarchive-tools zstd dpkg-dev
+      - name: Build every package
+        run: packaging/build.sh
+      - name: Check the result
+        run: |
+          v=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' discord-game-presence.py)
+          cd dist && ls -la && sha256sum -c SHA256SUMS
+          for f in "discord-game-presence-$v-1-any.pkg.tar.zst" "discord-game-presence_$v-1_all.deb" \
+                   "discord-game-presence-$v-1.noarch.rpm" discord-game-presence.py discord-presence-tray.py \
+                   discord-game-presence.service discord-game-presence-tray.service; do
+            test -s "$f" || { echo "missing $f"; exit 1; }
+          done
+          ls DiscordPresence-*.AppImage
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, integration, lint, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Version and release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -q "^VERSION = \"$v\"" discord-game-presence.py \
+            || { echo "discord-game-presence.py is not version $v"; exit 1; }
+          awk -v v="$v" '/^## / { if (f) exit; if ($2 == v) { f = 1; next } } f' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --latest \
+            --title "Discord Arrpc Detector KDE ${GITHUB_REF_NAME#v}" --notes-file notes.md

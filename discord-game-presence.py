@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -1827,6 +1827,246 @@ def claude_running():
     return [p for p in processes() if p.comm == "claude"]
 
 
+# ------------------------------------------------ outros sites no navegador
+# Twitch, Netflix, Crunchyroll e Spotify Web. Nenhum deles esta na base
+# detectavel do Discord, entao cada um precisa de um app proprio criado em
+# discord.com/developers (o Application ID vai pela bandeja, em "Add or edit
+# an app"). Sem o ID a entrada fica desligada.
+#
+# O YouTube tem um caminho proprio, bem mais fino (oEmbed, anuncios, Shorts).
+# Aqui basta saber qual aba toca: o player MPRIS do navegador com o titulo da
+# aba do site, ou a aba do site ativa numa janela visivel (navegando).
+WEB_SITES = {
+    "twitch": {"hosts": ("twitch.tv",), "name": "Twitch",
+               "captions": (" - Twitch",)},
+    "netflix": {"hosts": ("netflix.com",), "name": "Netflix",
+                "captions": (" | Netflix", " - Netflix")},
+    "crunchyroll": {"hosts": ("crunchyroll.com",), "name": "Crunchyroll",
+                    "captions": (" - Crunchyroll", " | Crunchyroll")},
+    "spotify": {"hosts": ("open.spotify.com",), "name": "Spotify",
+                "captions": (" | Spotify", " - Spotify", "Spotify – Web Player",
+                             "Spotify - Web Player")},
+}
+# primeiro pedaco do caminho que nao e um canal da Twitch
+TWITCH_PAGES = {"directory", "videos", "settings", "search", "downloads", "p", "jobs",
+                "subscriptions", "inventory", "drops", "wallet", "friends", "turbo",
+                "store", "prime", "following", "messages", "payments", "login",
+                "signup", "u", "moderator", "popout", "embed"}
+
+
+def site_of(url):
+    """Chave de WEB_SITES do endereco, ou None."""
+    try:
+        host = (urllib.parse.urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return None
+    for key, site in WEB_SITES.items():
+        if any(host == h or host.endswith("." + h) for h in site["hosts"]):
+            return key
+    return None
+
+
+def site_caption(title):
+    """Chave do site pelo titulo da aba ativa de uma janela, ou None."""
+    for key, site in WEB_SITES.items():
+        name = site["name"]
+        if title == name or any(title.endswith(c) or title == c.strip(" |-–")
+                                for c in site["captions"]):
+            return key
+    return None
+
+
+def site_title(key, title):
+    """Titulo da aba sem o nome do site e sem o "(3) " das notificacoes."""
+    title = re.sub(r"^\(\d+\+?\)\s*", "", title or "").strip()
+    for caption in WEB_SITES[key]["captions"]:
+        if title.endswith(caption) and title != caption:
+            title = title[:-len(caption)].strip()
+    if key == "crunchyroll":
+        title = re.sub(r"^(?:Watch|Assistir|Ver)\s+", "", title)
+    return "" if title in (WEB_SITES[key]["name"], "Spotify – Web Player") else title
+
+
+def site_player_page(key, url):
+    """Pagina que toca algo (e nao a inicial, uma busca ou uma lista)."""
+    path = url_path(url)
+    parts = [p for p in path.split("/") if p]
+    if key == "twitch":
+        return bool(parts) and (parts[0] not in TWITCH_PAGES or parts[0] == "videos")
+    if key == "netflix":
+        return path.startswith("/watch/")
+    if key == "crunchyroll":
+        return "/watch/" in path
+    return False  # o Spotify toca de qualquer pagina: so o MPRIS decide
+
+
+def _loose(text):
+    return _norm(text, keep_spaces=False)
+
+
+def site_media(key, found=None, tabs=None):
+    """(player, aba) do site tocando ou pausado, ou None.
+
+    O Firefox diz a URL de quem toca. No Chrome o player vale quando o titulo
+    dele aparece no titulo de uma aba do site (ou o contrario: a Netflix
+    publica so o nome da serie). Sobrando um player sem aba conhecida, ele so
+    vale se houver uma unica pagina de player do site aberta.
+    """
+    found = media_now() if found is None else found
+    best = None
+    for media in found:
+        process, title = media.get("process"), (media["meta"].get("xesam:title") or "")
+        artist = first(media["meta"].get("xesam:artist")) or ""
+        url = media["meta"].get("xesam:url") or ""
+        tab = None
+        if url:
+            if site_of(url) != key:
+                continue
+        elif process in CHROMIUM_PROCESSES:
+            if media.get("service"):
+                continue  # o YouTube ja e de outra entrada
+            tabs = open_tabs() if tabs is None else tabs
+            mine = [t for t in tabs if site_of(t.url) == key]
+            name, page = _loose(title), None
+            for t in mine:
+                page = _loose(site_title(key, t.title))
+                if name and page and (name in _loose(t.title) or page in name):
+                    tab = t
+                    break
+            if tab is None:
+                # o titulo tocado aparece numa aba de outro site: o som e dela
+                if name and any(name in _loose(t.title) for t in tabs
+                                if site_of(t.url) != key):
+                    continue
+                # o Chrome so regrava o titulo quando a URL muda, e a URL do
+                # Spotify fica a mesma de uma faixa para a outra
+                pages = ([t for t in mine] if key == "spotify" and artist
+                         else [t for t in mine if site_player_page(key, t.url)])
+                if len(pages) != 1:
+                    continue
+                tab = pages[0]
+        else:
+            continue
+        candidate = {**media, "tab": tab, "url": url or (tab.url if tab else "")}
+        if best is None or (media["status"] == "Playing" and best["status"] != "Playing"):
+            best = candidate
+    return best
+
+
+def site_browsing(key):
+    """Aba do site ativa numa janela visivel, ou None."""
+    windows = browser_windows()
+    if not windows:
+        return None
+    visible = [title for title, minimized in windows
+               if not minimized and site_caption(title) == key]
+    if not visible:
+        return None
+    tabs = _newest([t for t in open_tabs() if site_of(t.url) == key and t.selected])
+    return tabs[0] if tabs else None
+
+
+def site_now(key):
+    """("midia", player) ou ("navegando", (aba, desde)) do site, ou None."""
+    media = site_media(key)
+    if media and not media_idle(media["player"], pause_grace(key)):
+        browse_since(key, None)
+        return "midia", media
+    page = site_browsing(key) if media_option(key, "show_browsing") else None
+    since = browse_since(key, page)
+    if page and since:
+        return "navegando", (page, since)
+    return None
+
+
+def twitch_channel(url):
+    parts = [p for p in url_path(url).split("/") if p]
+    if parts and parts[0].lower() not in TWITCH_PAGES and re.fullmatch(r"\w{2,25}", parts[0]):
+        return parts[0]
+    return None
+
+
+def site_media_state(key, media):
+    """(state, extras) do que o site esta tocando."""
+    meta, player, tab = media["meta"], media["player"], media.get("tab")
+    name = WEB_SITES[key]["name"]
+    title = (meta.get("xesam:title") or "").strip()
+    artist = (first(meta.get("xesam:artist")) or "").strip()
+    page = site_title(key, tab.title) if tab else ""
+    url = media.get("url") or ""
+    if _loose(title) == _loose(name):
+        title = ""
+    extra = {"timestamps": None}
+    if key == "twitch":
+        channel = artist or twitch_channel(url) or page
+        link = f"https://www.twitch.tv/{twitch_channel(url)}" if twitch_channel(url) else None
+        extra["details"] = channel or name
+        state = title if title and _loose(title) != _loose(channel) else None
+        if link:
+            extra.update(details_url=link, large_url=link,
+                         buttons=[{"label": "Assistir na Twitch", "url": link}])
+        if media["status"] != "Playing":
+            return paused_text(state, None), extra
+        return state or "Assistindo", extra
+    if key == "spotify":
+        extra["details"] = title or page or name
+        art = clean_url(meta.get("mpris:artUrl"))
+        art = art if art and art.startswith("https://") else ytm_art(meta)
+        if art:
+            extra.update(large_image=art, large_text=meta.get("xesam:album") or title or name)
+        if media["status"] != "Playing":
+            position = mpris_position(player, tries=1)
+            return paused_text(artist, position), extra
+        length = track_length(title, meta)
+        position = anchored_position(title, mpris_position(player))
+        extra["timestamps"] = media_timestamps(title, position, length, player)
+        return artist or name, extra
+    # Netflix e Crunchyroll: o nome do que passa, quando a pagina diz
+    what = title or page
+    if artist and what and _loose(artist) not in _loose(what):
+        what = f"{what} · {artist}"
+    extra["details"] = what or name
+    if media["status"] != "Playing":
+        position = mpris_position(player, tries=1)
+        return paused_text(None, position), extra
+    length = track_length(what, meta)
+    position = anchored_position(what, mpris_position(player))
+    extra["timestamps"] = media_timestamps(what, position, length, player)
+    return "Assistindo", extra
+
+
+def site_browse_state(key, tab, since):
+    text = "Navegando"
+    if key == "twitch" and twitch_channel(tab.url):
+        text = f"No canal {twitch_channel(tab.url)}"
+    elif key == "spotify" and url_path(tab.url).startswith(("/search",)):
+        text = "Pesquisando"
+    return None, {"details": text, "timestamps": {"start": int(since)},
+                  "status_display_type": 0}
+
+
+def site_running(key):
+    def check():
+        now = site_now(key)
+        if not now:
+            return None
+        return now[1]["player"] if now[0] == "midia" else f"navegando em {key}"
+    return check
+
+
+def site_state(key):
+    def state():
+        now = site_now(key)
+        if not now:
+            return None
+        kind, item = now
+        result = (site_browse_state(key, *item) if kind == "navegando"
+                  else site_media_state(key, item))
+        _LAST_STATE[key] = result
+        return result
+    return state
+
+
 # ---------------------------------------------------------------- GTA SA
 # O jogo guarda tudo em enderecos fixos (imagem carregada em 0x400000, sem
 # ASLR), entao da para ler o estado direto de /proc/<pid>/mem: onde o CJ esta,
@@ -2191,6 +2431,219 @@ def l4d2_state():
     return slug, None
 
 
+# ------------------------------------------------------------- Counter-Strike 2
+# Game State Integration, o recurso oficial da Valve: um arquivo
+# gamestate_integration_*.cfg em game/csgo/cfg faz o jogo mandar o estado
+# (mapa, modo, placar, estatisticas do jogador) por HTTP POST para o endereco
+# dele. Aqui o endereco e 127.0.0.1, so esta maquina, e o token do arquivo
+# precisa voltar em cada POST. O jogo le os .cfg so quando abre: instalado com
+# o CS2 aberto, os detalhes aparecem a partir da proxima vez.
+CS2_DIR = "Counter-Strike Global Offensive"
+CS2_PORT = int(os.environ.get("DGP_CS2_PORT") or 47838)
+CS2_CFG = "gamestate_integration_discord_presence.cfg"
+CS2_FRESH = 90  # o heartbeat e de 30 s: sem POST por mais que isso, o jogo saiu
+CS2_MAX_BODY = 1 << 20
+_CS2 = {"data": None, "stamp": -1e9, "server": None, "warned": False}
+_CS2_LOCK = threading.Lock()
+CS2_MODES = {"competitive": "Competitivo", "casual": "Casual", "deathmatch": "Mata-mata",
+             "scrimcomp2v2": "Wingman", "gungameprogressive": "Corrida armamentista",
+             "training": "Treino", "custom": "Personalizado", "premier": "Premier",
+             "survival": "Zona de Perigo", "cooperative": "Cooperativo"}
+
+
+def cs2_token():
+    """Token do .cfg, criado na primeira vez e guardado so para o usuario."""
+    path = (pathlib.Path(os.environ.get("XDG_DATA_HOME")
+                         or pathlib.Path.home() / ".local/share")
+            / "discord-game-presence" / "cs2-token")
+    try:
+        token = path.read_text().strip()
+        if re.fullmatch(r"[0-9a-f]{32}", token):
+            return token
+    except OSError:
+        pass
+    token = os.urandom(16).hex()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token + "\n")
+    return token
+
+
+def cs2_cfg_text(token, port=None):
+    port = port or CS2_PORT
+    return f'''"Discord Presence"
+{{
+ "uri" "http://127.0.0.1:{port}"
+ "timeout" "5.0"
+ "buffer" "0.5"
+ "throttle" "2.0"
+ "heartbeat" "30.0"
+ "auth"
+ {{
+   "token" "{token}"
+ }}
+ "data"
+ {{
+   "provider" "1"
+   "map" "1"
+   "round" "1"
+   "player_id" "1"
+   "player_match_stats" "1"
+ }}
+}}
+'''
+
+
+def cs2_cfg_dirs():
+    game = steam_game_dir(CS2_DIR)
+    cfg = game / "game/csgo/cfg" if game else None
+    return [cfg] if cfg and cfg.is_dir() else []
+
+
+def cs2_install_cfg():
+    """Grava o .cfg em cada CS2 instalado; True quando algum mudou."""
+    changed = False
+    text = None
+    for cfg in cs2_cfg_dirs():
+        text = text or cs2_cfg_text(cs2_token())
+        path = cfg / CS2_CFG
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                continue
+        except OSError:
+            pass
+        try:
+            path.write_text(text, encoding="utf-8")  # sem BOM: o jogo recusa
+            log(f"CS2: Game State Integration instalado em {path}")
+            changed = True
+        except OSError as error:
+            log(f"CS2: nao consegui gravar {path}: {error}")
+    return changed
+
+
+def cs2_accept(payload, token):
+    """Guarda um POST do jogo, se ele trouxer o token certo."""
+    if not isinstance(payload, dict):
+        return False
+    auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
+    if not token or auth.get("token") != token:
+        return False
+    with _CS2_LOCK:
+        _CS2.update(data=payload, stamp=time.monotonic())
+    return True
+
+
+def cs2_server():
+    """Servidor HTTP em 127.0.0.1 que recebe o estado do jogo (uma vez so)."""
+    with _CS2_LOCK:
+        if _CS2["server"] is not None:
+            return _CS2["server"]
+        _CS2["server"] = False
+    import http.server  # so quando o CS2 esta no catalogo
+
+    token = cs2_token()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            try:
+                size = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                size = -1
+            if not 0 < size <= CS2_MAX_BODY:
+                self.send_response(413)
+                self.end_headers()
+                return
+            try:
+                payload = json.loads(self.rfile.read(size))
+            except ValueError:
+                payload = None
+            self.send_response(200 if cs2_accept(payload, token) else 403)
+            self.end_headers()
+
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", CS2_PORT), Handler)
+    except OSError as error:
+        log(f"CS2: porta {CS2_PORT} ocupada ({error}); sem mapa e placar")
+        return False
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    with _CS2_LOCK:
+        _CS2["server"] = server
+    return server
+
+
+def cs2_data():
+    with _CS2_LOCK:
+        if time.monotonic() - _CS2["stamp"] > CS2_FRESH:
+            return None
+        return _CS2["data"]
+
+
+def cs2_map_name(name):
+    name = (name or "").rsplit("/", 1)[-1]
+    name = re.sub(r"^(?:de|cs|ar|dm|gd|dz|aim|awp|fy|surf|kz)_", "", name)
+    return name.replace("_", " ").title() if name else ""
+
+
+def cs2_details():
+    data = cs2_data() or {}
+    game_map = data.get("map") if isinstance(data.get("map"), dict) else {}
+    if not game_map:
+        return "Counter-Strike 2"
+    mode = game_map.get("mode") or ""
+    mode = CS2_MODES.get(mode, mode.replace("_", " ").title())
+    return " · ".join(filter(None, (mode, cs2_map_name(game_map.get("name"))))) \
+        or "Counter-Strike 2"
+
+
+def cs2_state():
+    """Menu, aquecimento, placar do seu time e K/A/D, pelo estado do jogo."""
+    cs2_server()
+    data = cs2_data()
+    if data is None:
+        if cs2_install_cfg() or not _CS2["warned"]:
+            _CS2["warned"] = True
+            log("CS2: sem estado do jogo ainda (reabra o CS2 se o .cfg acabou de ser instalado)")
+        return "Jogando", None
+    player = data.get("player") if isinstance(data.get("player"), dict) else {}
+    provider = data.get("provider") if isinstance(data.get("provider"), dict) else {}
+    game_map = data.get("map") if isinstance(data.get("map"), dict) else {}
+    if not game_map:
+        return "No menu", None
+    me = bool(player) and player.get("steamid") == provider.get("steamid")
+    team = (player.get("team") or "").upper() if me else ""
+    ct = (game_map.get("team_ct") or {}).get("score")
+    t = (game_map.get("team_t") or {}).get("score")
+    phase = game_map.get("phase")
+    if isinstance(ct, int) and isinstance(t, int):
+        mine, theirs = (t, ct) if team == "T" else (ct, t)
+        score = f"{mine} x {theirs}" if team in ("CT", "T") else f"CT {ct} x {t} T"
+    else:
+        score = ""
+    if phase == "warmup":
+        text = "Aquecimento"
+    elif phase == "gameover":
+        text = f"Fim de partida · {score}" if score else "Fim de partida"
+    else:
+        text = score or "Jogando"
+    stats = player.get("match_stats") if me and isinstance(player.get("match_stats"), dict) else {}
+    if stats and phase != "warmup":
+        k, a, d = (stats.get(n) for n in ("kills", "assists", "deaths"))
+        if all(isinstance(v, int) for v in (k, a, d)):
+            text = f"{text} · {k}/{a}/{d}"
+    if player and not me:
+        text = f"{text} · assistindo"
+    return text, None
+
+
 # ------------------------------------------------------------- Minecraft
 # O processo e o java que leva o caminho de uma instancia (Prism, MultiMC,
 # PolyMC, inclusive em Flatpak) ou o main do Minecraft. A pasta do jogo e o
@@ -2540,6 +2993,44 @@ GAMES = {
         "details": "Left 4 Dead 2",
         "state": l4d2_state,
         "large_text": "Left 4 Dead 2",
+    },
+    # Counter-Strike 2 nativo. Mapa, modo e placar chegam pelo Game State
+    # Integration (veja cs2_state); sem ele, so "Jogando". O Vesktop tambem
+    # detecta o jogo pela Steam: com o mesmo Application ID o Discord junta as
+    # duas coisas numa presenca so.
+    "cs2": {
+        "client_id": "1158877933042143272",
+        "match": [{"exe": "cs2"}, {"exe": "cs2.exe"}],
+        "details": cs2_details,
+        "state": cs2_state,
+        "poll": 5,
+        "large_text": "Counter-Strike 2",
+    },
+    # Sites no navegador. Nenhum esta na base do Discord: o Application ID
+    # vem de um app criado em discord.com/developers, com o nome do site, e
+    # entra pela bandeja ("Add or edit an app"). Sem ele, desligado.
+    "twitch": {
+        "poll": 10, "grace": 10, "client_id": "", "needs_id": True,
+        "details": "Twitch", "state": site_state("twitch"),
+        "running": site_running("twitch"), "large_text": "Twitch", "type": 3,
+        "status_display": "details",
+    },
+    "netflix": {
+        "poll": 10, "grace": 10, "client_id": "", "needs_id": True,
+        "details": "Netflix", "state": site_state("netflix"),
+        "running": site_running("netflix"), "large_text": "Netflix", "type": 3,
+    },
+    "crunchyroll": {
+        "poll": 10, "grace": 10, "client_id": "", "needs_id": True,
+        "details": "Crunchyroll", "state": site_state("crunchyroll"),
+        "running": site_running("crunchyroll"), "large_text": "Crunchyroll", "type": 3,
+        "status_display": "details",
+    },
+    "spotify": {
+        "poll": 5, "grace": 10, "client_id": "", "needs_id": True,
+        "details": "Spotify", "state": site_state("spotify"),
+        "running": site_running("spotify"), "large_text": "Spotify", "type": 2,
+        "status_display": "details",
     },
     "PrismLauncher/instances": {
         "client_id": "1410791091501928458",
@@ -3404,7 +3895,8 @@ PACKAGE_ASSETS = {
     "rpm": r"discord-game-presence-{v}-\d+\.noarch\.rpm",
     "appimage": r"DiscordPresence-{v}-x86_64\.AppImage",
 }
-SELF_UPDATING = ("script", "appimage")  # instalam sem pedir senha
+SELF_UPDATING = ("script", "appimage")
+AUR_NAME = "discord-arrpc-detector-kde"  # instalam sem pedir senha
 DAEMON_SERVICE = "discord-game-presence.service"
 TRAY_SERVICE = "discord-game-presence-tray.service"
 
@@ -3477,6 +3969,10 @@ def install_kind(path=None):
             except (OSError, subprocess.TimeoutExpired):
                 continue
             if done.returncode == 0:
+                # o pacote do AUR tem outro nome e quem atualiza e o helper
+                # do AUR; o .pkg.tar.zst da release brigaria com ele
+                if kind == "pacman" and done.stdout.decode(errors="replace").strip() == AUR_NAME:
+                    return "aur"
                 return kind
     return "manual"
 
@@ -3489,6 +3985,9 @@ def update_files(release, kind):
         if missing:
             raise UpdateError("the release has no " + " or ".join(missing))
         return {name: assets[name] for name in SCRIPT_FILES if name in assets}
+    if kind == "aur":
+        raise UpdateError("installed from the AUR: update it with your AUR helper "
+                          "(yay -Syu, paru -Syu)")
     pattern = PACKAGE_ASSETS.get(kind)
     if not pattern:
         raise UpdateError("this copy was not installed by the installer or a package; "

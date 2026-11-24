@@ -41,6 +41,8 @@ stage_tree() {
     install -Dm644 "$ROOT/packaging/files/$PKGNAME.svg" \
         "$dest/usr/share/icons/hicolor/scalable/apps/$PKGNAME.svg"
     install -Dm644 "$ROOT/README.md"    "$dest/usr/share/doc/$PKGNAME/README.md"
+    install -Dm644 "$ROOT/README.pt-BR.md" "$dest/usr/share/doc/$PKGNAME/README.pt-BR.md"
+    install -Dm644 "$ROOT/LICENSE"      "$dest/usr/share/licenses/$PKGNAME/LICENSE"
     install -Dm644 "$ROOT/INSTALAR.txt" "$dest/usr/share/doc/$PKGNAME/INSTALAR.txt"
     install -Dm644 "$ROOT/docs/config.exemplo.json" \
         "$dest/usr/share/doc/$PKGNAME/config.exemplo.json"

@@ -1,0 +1,19 @@
+name: Support for a game or site
+description: Ask for a game, launcher or website to be detected
+labels: ["enhancement"]
+body:
+  - type: input
+    id: app
+    attributes:
+      label: Game or site
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it runs
+      description: Native, Proton/Wine, Flatpak, browser (which one)? Output of `discord-game-presence --scan` while it is open helps.
+  - type: textarea
+    id: show
+    attributes:
+      label: What you would like friends to see

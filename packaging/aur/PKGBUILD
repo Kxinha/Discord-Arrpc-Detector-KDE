@@ -1,0 +1,40 @@
+# Maintainer: gabrielmf1998 <https://github.com/gabrielmf1998>
+pkgname=discord-arrpc-detector-kde
+_pkgbin=discord-game-presence
+pkgver=1.5.0
+pkgrel=1
+pkgdesc="Discord Rich Presence for Linux games and browser media Discord ignores, with a tray icon"
+arch=('any')
+url="https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk3' 'iproute2')
+optdepends=('libayatana-appindicator: tray icon'
+            'librsvg: tray icon rendering'
+            'libnotify: tray notifications'
+            'vesktop: Discord client with the Rich Presence socket')
+# same file names as the unrelated AUR package "discord-game-presence"
+conflicts=('discord-game-presence')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+check() {
+    cd "Discord-Arrpc-Detector-KDE-$pkgver"
+    python -I discord-game-presence.py --version | grep -qx "$pkgver"
+}
+
+package() {
+    cd "Discord-Arrpc-Detector-KDE-$pkgver"
+    install -Dm755 discord-game-presence.py "$pkgdir/usr/bin/$_pkgbin"
+    install -Dm755 discord-presence-tray.py "$pkgdir/usr/bin/discord-presence-tray"
+    install -Dm644 packaging/files/$_pkgbin.service \
+        "$pkgdir/usr/lib/systemd/user/$_pkgbin.service"
+    install -Dm644 packaging/files/$_pkgbin-tray.service \
+        "$pkgdir/usr/lib/systemd/user/$_pkgbin-tray.service"
+    install -Dm644 packaging/files/discord-presence-tray.desktop \
+        "$pkgdir/usr/share/applications/discord-presence-tray.desktop"
+    install -Dm644 packaging/files/$_pkgbin.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_pkgbin.svg"
+    install -Dm644 README.md README.pt-BR.md INSTALAR.txt docs/config.exemplo.json \
+        -t "$pkgdir/usr/share/doc/$pkgname/"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

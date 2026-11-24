@@ -43,6 +43,8 @@ cp -a usr %{buildroot}/
 %{_datadir}/applications/discord-presence-tray.desktop
 %{_datadir}/icons/hicolor/scalable/apps/discord-game-presence.svg
 %doc %{_datadir}/doc/discord-game-presence/README.md
+%doc %{_datadir}/doc/discord-game-presence/README.pt-BR.md
+%license %{_datadir}/licenses/discord-game-presence/LICENSE
 %doc %{_datadir}/doc/discord-game-presence/INSTALAR.txt
 %doc %{_datadir}/doc/discord-game-presence/config.exemplo.json
 

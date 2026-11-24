@@ -1,0 +1,41 @@
+name: Something does not work
+description: A game or site is not shown, the presence is wrong, or the tray misbehaves
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! The tray's **Report a problem** fills version, system and log for you.
+        Check the log below before sending: nothing personal should be in it.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What you expected to see on your profile, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to see it happen
+      placeholder: |
+        1. Open ...
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Tray, Updates menu, or `discord-game-presence --version`
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: System
+      description: Distro, desktop, Discord client (Vesktop, Discord, Flatpak?), how you installed
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: "`journalctl --user -u discord-game-presence -n 40 -o cat`"
+      render: text

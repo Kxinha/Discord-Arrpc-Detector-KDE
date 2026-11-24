@@ -1,0 +1,7 @@
+# The GitLab mirror runs the same unit tests on every push. Packages and
+# releases are built by GitHub Actions; see docs/RELEASING.md.
+tests:
+  image: python:3.13-slim
+  script:
+    - python -m py_compile discord-game-presence.py discord-presence-tray.py
+    - python -m unittest discover -s tests -v

@@ -21,7 +21,7 @@
 set -euo pipefail
 
 REPO="gabrielmf1998/Discord-Arrpc-Detector-KDE"
-GITLAB="https://gitlab.com/gabriel17166/arrpc-personalizado-pessoal-linux"
+GITLAB="https://gitlab.com/gabriel17166/discord-arrpc-detector-kde"
 DGP_VERSION="${DGP_VERSION:-latest}"
 DGP_MIRROR="${DGP_MIRROR:-github}"
 case "$DGP_MIRROR:$DGP_VERSION" in
