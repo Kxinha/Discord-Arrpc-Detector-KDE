@@ -605,38 +605,71 @@ class ChromePlayer(unittest.TestCase):
                          ("youtube", False, None))
 
 
-class SilentVideo(unittest.TestCase):
-    """Video mudo: o Chrome nao publica MPRIS, a janela diz o que esta aberto."""
+class HeldPlayer(unittest.TestCase):
+    """Outra aba pega o player MPRIS do Chrome com um aviso: o video segura."""
 
     def setUp(self):
         saved = {name: getattr(dgp, name) for name in
-                 ("browser_windows", "open_tabs", "history_url", "track_length",
-                  "youtube_oembed", "video_thumbnail", "media_player")}
+                 ("media_player", "media_now", "open_tabs", "media_idle", "video_state",
+                  "browsing")}
         self.addCleanup(lambda: [setattr(dgp, k, v) for k, v in saved.items()])
-        dgp._SILENT.clear()
-        self.windows = [("(4) Video A - YouTube - Google Chrome", False)]
-        dgp.browser_windows = lambda: [(c[:-len(" - Google Chrome")], m) for c, m in self.windows]
-        dgp.open_tabs = lambda: [Tab(("x", 1), 1, 0, False, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        dgp._HELD.clear()
+        dgp._LAST_STATE.clear()
+        self.addCleanup(dgp._HELD.clear)
+        self.addCleanup(dgp._LAST_STATE.clear)
+        self.yt = {"player": "p", "process": "chrome", "service": "youtube", "status": "Playing",
+                   "video": "AAAAAAAAAAA", "ad": False, "pending": False}
+        self.other = {"player": "p", "process": "chrome", "service": None, "status": "Paused"}
+        self.current = self.yt
+        dgp.media_player = lambda service: self.current if self.current.get("service") == service else None
+        dgp.media_now = lambda: [self.current]
+        self.tabs = [Tab(("x", 1), 1, 0, False, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        dgp.open_tabs = lambda: self.tabs
+        dgp.media_idle = lambda player, grace=0: False
+        dgp.browsing = lambda service: None
+        end = int(time.time()) + 600
+        dgp.video_state = lambda media: ("Canal A", {"details": "Video A",
+                                                     "timestamps": {"start": end - 900, "end": end}})
+
+    def test_notification_sound_does_not_drop_the_video(self):
+        playing = dgp.yt_state()
+        self.current = self.other
+        self.assertEqual(dgp.yt_state(), playing)
+        self.assertTrue(dgp.yt_running())
+
+    def test_closed_tab_or_finished_video_drops_it(self):
+        dgp.yt_state()
+        self.current = self.other
+        self.tabs = []
+        self.assertIsNone(dgp.yt_state())
+        self.tabs = [Tab(("x", 1), 1, 0, False, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        self.current = self.yt
+        dgp.yt_state()
+        self.current = self.other
+        dgp._HELD["youtube"]["until"] = time.time() - 1
+        self.assertIsNone(dgp.yt_state())
+
+    def test_other_media_really_playing_drops_it(self):
+        dgp.yt_state()
+        self.current = dict(self.other, status="Playing")
+        self.assertIsNotNone(dgp.yt_state())
+        dgp._HELD["youtube"]["other"] -= dgp.HOLD_OTHER + 1
+        self.assertIsNone(dgp.yt_state())
+
+    def test_paused_other_title_is_not_an_ad(self):
+        dgp._TRACK_TAB.clear()
+        dgp._MISMATCH.clear()
+        saved = {n: getattr(dgp, n) for n in ("youtube_oembed", "history_url", "browser_windows")}
+        self.addCleanup(lambda: [setattr(dgp, k, v) for k, v in saved.items()])
+        dgp.youtube_oembed = lambda video: {"title": "Video A"}
         dgp.history_url = lambda title, files=None: ""
-        dgp.track_length = lambda title, meta, video=None: 600 * 1_000_000
-        dgp.youtube_oembed = lambda video: {"title": "Video A", "author_name": "Canal A"}
-        dgp.video_thumbnail = lambda video: "thumb"
-        dgp.media_player = lambda service: None
-
-    def test_visible_muted_video_is_shown(self):
-        kind, item = dgp.service_now("youtube")
-        self.assertEqual((kind, item["video"]), ("mudo", "AAAAAAAAAAA"))
-        text, extra = dgp.yt_state()
-        self.assertEqual((text, extra["details"]), ("Canal A", "Video A"))
-
-    def test_minimized_loading_or_too_long(self):
-        self.windows = [("Video A - YouTube - Google Chrome", True)]
-        self.assertIsNone(dgp.silent_video("youtube"))
-        self.windows = [("YouTube - Google Chrome", False)]
-        self.assertIsNone(dgp.silent_video("youtube"))
-        self.windows = [("Video A - YouTube - Google Chrome", False)]
-        dgp.silent_video("youtube")["since"] -= 600 + dgp.SILENT_SLACK + 1
-        self.assertIsNone(dgp.silent_video("youtube"))
+        dgp.browser_windows = lambda: []
+        tabs = [Tab(("x", 1), 1, 0, True, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        props = {"PlaybackStatus": "Playing", "Metadata": {"xesam:title": "Video A", "mpris:trackid": "T1"}}
+        dgp.resolve_player("p", "chrome", props, tabs, [])
+        props = {"PlaybackStatus": "Paused", "Metadata": {"xesam:title": "Aviso", "mpris:trackid": "T1"}}
+        media = dgp.resolve_player("p", "chrome", props, tabs, [])
+        self.assertEqual((media["service"], media["ad"]), (None, False))
 
 
 class OpenProfiles(unittest.TestCase):

@@ -4,6 +4,16 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.5
+
+The real reason YouTube kept disappearing.
+
+* Chrome has a single media player (MPRIS) for all tabs, and it goes to the last tab that made a sound. A page that uses Web Audio (Agents Web, WhatsApp Web and other chat sites) playing a short notification takes the player and keeps it, showing "Paused" or "Stopped" with no title, while YouTube goes on playing in its tab. Measured in Chrome 158: only pressing play on the video again gives the player back, pausing does not. Now the video that was playing keeps the presence while its tab is still open on the same video, its time has not run out, and no other media is really playing for more than 20 s.
+* A different title on a paused player is no longer taken as an ad: ads play, a paused title is another tab holding the player.
+* The 1.5.4 muted video workaround is gone. Muting was not the cause (Chrome keeps publishing muted videos, verified), and the workaround could keep a paused video on the profile.
+
+* O YouTube sumia porque outra aba (Agents, WhatsApp Web) tocava um aviso e pegava o único player de mídia do Chrome. Agora o vídeo que estava tocando segura a presença enquanto a aba dele continua aberta e o tempo não acabou. Mute nunca foi o problema, e o remendo da 1.5.4 saiu.
+
 ## 1.5.4
 
 Muted YouTube videos show up again.

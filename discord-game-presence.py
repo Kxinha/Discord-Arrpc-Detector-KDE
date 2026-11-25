@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -1298,6 +1298,11 @@ def resolve_player(name, process, props, tabs, windows=None):
         media.update(url=url, service=media_service(url), tab=None,
                      video=youtube_video_id(url), source="historico")
         return media
+    if media["status"] != "Playing":
+        # anuncio toca; parado com outro titulo e outra aba com o player
+        _MISMATCH.pop(name, None)
+        media.update(url="", service=None, tab=None, video=None, source="outra aba")
+        return media
     windows = browser_windows() if windows is None else windows
     if caption_playing(title, windows):
         _MISMATCH.pop(name, None)
@@ -1557,10 +1562,10 @@ def service_now(service):
     if media and not media_idle(media["player"], pause_grace(service)):
         browse_since(service, None)
         return "midia", media
-    silent = silent_video(service)
-    if silent:
+    if media is None and held_media(service) and service in _LAST_STATE:
         browse_since(service, None)
-        return "mudo", silent
+        return "segurando", _HELD[service]
+    _HELD.pop(service, None)
     page = browsing(service) if media_option(service, "show_browsing") else None
     since = browse_since(service, page[0] if page else None)
     if page and since:
@@ -1568,77 +1573,57 @@ def service_now(service):
     return None
 
 
-# Video sem som. O Chrome so cria o player MPRIS para midia com audio: mutar o
-# video (ou o autoplay mudo) faz o player sumir, ou ficar "Stopped" e sem
-# titulo, com o video correndo na tela. A janela do KWin continua dizendo qual
-# pagina esta aberta, entao um video aberto numa janela visivel conta como
-# assistido, ate passar da duracao dele (depois disso, alguem pausou e saiu).
-_SILENT = {}
-SILENT_SLACK = 120
+# Chrome tem um player MPRIS so, e ele vai para a ultima aba que tocou algum
+# som. Uma pagina que ja usou Web Audio (o Agents Web, o WhatsApp Web) e toca
+# um aviso curto pega o player para ela e fica com ele, "Paused" ou "Stopped",
+# enquanto o YouTube continua tocando na outra aba (medido no Chrome 158: so dar
+# play de novo no video devolve o player; pausar nao). Sem isso a presenca do
+# video sumia no meio. Entao o ultimo video que estava tocando segura a
+# presenca enquanto: a aba dele continua aberta no mesmo video, o tempo dele
+# nao acabou, e nenhuma outra midia ficou tocando de verdade por mais de
+# HOLD_OTHER segundos (um aviso dura menos que isso).
+_HELD = {}
+HOLD_OTHER = 20
+HOLD_NO_LENGTH = 900  # live, ou video sem duracao conhecida
+HOLD_SLACK = 30
 
 
-def silent_video(service):
-    """{"url", "video", "title", "since"} do video aberto, sem som, numa janela
-    visivel; None quando nao ha."""
-    if service != "youtube":
-        return None
-    titles = service_windows(service, browser_windows())
-    if len(titles) != 1:
-        _SILENT.pop(service, None)
-        return None
-    title = page_title(titles[0])
-    if not title or title in ("YouTube", "YouTube Music"):
-        _SILENT.pop(service, None)
-        return None  # pagina carregando: o titulo ainda e o do site
-    url = ""
-    for tab in open_tabs():
-        if is_player_page(tab.url) and page_title(tab.title) == title:
-            url = tab.url
-            break
-    url = url or history_url(title)
-    video = youtube_video_id(url)
-    if not video:
-        _SILENT.pop(service, None)
-        return None
-    seen = _SILENT.get(service)
-    if not seen or seen["video"] != video:
-        seen = _SILENT[service] = {"url": url, "video": video, "title": title,
-                                   "since": time.time()}
-    length = track_length(title, {}, video)
-    if length and time.time() - seen["since"] > length / 1_000_000 + SILENT_SLACK:
-        return None
-    return seen
+def hold_media(service, media, state):
+    """Anota o video que esta tocando agora, com ate quando ele vale."""
+    if not media.get("video") or media.get("ad") or media.get("status") != "Playing":
+        return
+    extra = state[1] if isinstance(state, tuple) and isinstance(state[1], dict) else {}
+    end = (extra.get("timestamps") or {}).get("end")
+    until = end + HOLD_SLACK if end else time.time() + HOLD_NO_LENGTH
+    _HELD[service] = {"video": media["video"], "until": until, "other": None}
 
 
-def silent_state(service, item):
-    """Presenca de um video sem som: titulo, canal e capa, tempo desde que abriu."""
-    video, url = item["video"], item["url"]
-    info = youtube_oembed(video)
-    shorts = url_path(url).startswith("/shorts/")
-    link = (f"https://www.youtube.com/shorts/{video}" if shorts
-            else f"https://www.youtube.com/watch?v={video}")
-    name = info.get("title") or item["title"]
-    channel = info.get("author_name") or ""
-    extra = {"details": name, "details_url": link, "timestamps": {"start": int(item["since"])},
-             "large_image": video_thumbnail(video), "large_text": name, "large_url": link,
-             "small_image": YT_ICON, "small_text": "YouTube",
-             "buttons": [{"label": "Assistir no YouTube", "url": link}]}
-    channel_url = info.get("author_url") or ""
-    if channel_url.startswith("https://"):
-        extra["state_url"] = channel_url
-        extra["buttons"].append({"label": "Ver o canal", "url": channel_url})
-    text = channel or "YouTube"
-    if shorts:
-        text = f"Shorts · {channel}" if channel else "Shorts"
-    return text, extra
+def held_media(service):
+    """O video que segura a presenca enquanto outra aba esta com o player."""
+    held = _HELD.get(service)
+    if not held:
+        return None
+    now = time.monotonic()
+    other = any(m["process"] in CHROMIUM_PROCESSES and m["service"] is None
+                and m["status"] == "Playing" for m in media_now())
+    if not other:
+        held["other"] = None
+    elif held["other"] is None:
+        held["other"] = now
+    open_now = any(youtube_video_id(t.url) == held["video"] for t in open_tabs())
+    if (not open_now or time.time() > held["until"]
+            or (held["other"] is not None and now - held["other"] > HOLD_OTHER)):
+        _HELD.pop(service, None)
+        return None
+    return held
 
 
 def yt_running():
     now = service_now("youtube")
     if not now:
         return None
-    if now[0] == "mudo":
-        return "video sem som no YouTube"
+    if now[0] == "segurando":
+        return "video do YouTube (player com outra aba)"
     return now[1]["player"] if now[0] == "midia" else "navegando no YouTube"
 
 
@@ -1656,12 +1641,13 @@ def _service_state(service, media_state):
     kind, item = now
     if kind == "navegando":
         state = browse_state(service, *item)
-    elif kind == "mudo":
-        state = silent_state(service, item)
+    elif kind == "segurando":  # o mesmo de antes: os tempos sao absolutos
+        return _LAST_STATE.get(service)
     elif item["pending"]:  # troca de video que a aba ainda nao gravou
         return _LAST_STATE.get(service)
     else:
         state = media_state(item)
+        hold_media(service, item, state)
     _LAST_STATE[service] = state
     return state
 
