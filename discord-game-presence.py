@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -1557,6 +1557,10 @@ def service_now(service):
     if media and not media_idle(media["player"], pause_grace(service)):
         browse_since(service, None)
         return "midia", media
+    silent = silent_video(service)
+    if silent:
+        browse_since(service, None)
+        return "mudo", silent
     page = browsing(service) if media_option(service, "show_browsing") else None
     since = browse_since(service, page[0] if page else None)
     if page and since:
@@ -1564,10 +1568,77 @@ def service_now(service):
     return None
 
 
+# Video sem som. O Chrome so cria o player MPRIS para midia com audio: mutar o
+# video (ou o autoplay mudo) faz o player sumir, ou ficar "Stopped" e sem
+# titulo, com o video correndo na tela. A janela do KWin continua dizendo qual
+# pagina esta aberta, entao um video aberto numa janela visivel conta como
+# assistido, ate passar da duracao dele (depois disso, alguem pausou e saiu).
+_SILENT = {}
+SILENT_SLACK = 120
+
+
+def silent_video(service):
+    """{"url", "video", "title", "since"} do video aberto, sem som, numa janela
+    visivel; None quando nao ha."""
+    if service != "youtube":
+        return None
+    titles = service_windows(service, browser_windows())
+    if len(titles) != 1:
+        _SILENT.pop(service, None)
+        return None
+    title = page_title(titles[0])
+    if not title or title in ("YouTube", "YouTube Music"):
+        _SILENT.pop(service, None)
+        return None  # pagina carregando: o titulo ainda e o do site
+    url = ""
+    for tab in open_tabs():
+        if is_player_page(tab.url) and page_title(tab.title) == title:
+            url = tab.url
+            break
+    url = url or history_url(title)
+    video = youtube_video_id(url)
+    if not video:
+        _SILENT.pop(service, None)
+        return None
+    seen = _SILENT.get(service)
+    if not seen or seen["video"] != video:
+        seen = _SILENT[service] = {"url": url, "video": video, "title": title,
+                                   "since": time.time()}
+    length = track_length(title, {}, video)
+    if length and time.time() - seen["since"] > length / 1_000_000 + SILENT_SLACK:
+        return None
+    return seen
+
+
+def silent_state(service, item):
+    """Presenca de um video sem som: titulo, canal e capa, tempo desde que abriu."""
+    video, url = item["video"], item["url"]
+    info = youtube_oembed(video)
+    shorts = url_path(url).startswith("/shorts/")
+    link = (f"https://www.youtube.com/shorts/{video}" if shorts
+            else f"https://www.youtube.com/watch?v={video}")
+    name = info.get("title") or item["title"]
+    channel = info.get("author_name") or ""
+    extra = {"details": name, "details_url": link, "timestamps": {"start": int(item["since"])},
+             "large_image": video_thumbnail(video), "large_text": name, "large_url": link,
+             "small_image": YT_ICON, "small_text": "YouTube",
+             "buttons": [{"label": "Assistir no YouTube", "url": link}]}
+    channel_url = info.get("author_url") or ""
+    if channel_url.startswith("https://"):
+        extra["state_url"] = channel_url
+        extra["buttons"].append({"label": "Ver o canal", "url": channel_url})
+    text = channel or "YouTube"
+    if shorts:
+        text = f"Shorts · {channel}" if channel else "Shorts"
+    return text, extra
+
+
 def yt_running():
     now = service_now("youtube")
     if not now:
         return None
+    if now[0] == "mudo":
+        return "video sem som no YouTube"
     return now[1]["player"] if now[0] == "midia" else "navegando no YouTube"
 
 
@@ -1585,6 +1656,8 @@ def _service_state(service, media_state):
     kind, item = now
     if kind == "navegando":
         state = browse_state(service, *item)
+    elif kind == "mudo":
+        state = silent_state(service, item)
     elif item["pending"]:  # troca de video que a aba ainda nao gravou
         return _LAST_STATE.get(service)
     else:

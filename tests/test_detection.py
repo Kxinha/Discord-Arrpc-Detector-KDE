@@ -605,6 +605,40 @@ class ChromePlayer(unittest.TestCase):
                          ("youtube", False, None))
 
 
+class SilentVideo(unittest.TestCase):
+    """Video mudo: o Chrome nao publica MPRIS, a janela diz o que esta aberto."""
+
+    def setUp(self):
+        saved = {name: getattr(dgp, name) for name in
+                 ("browser_windows", "open_tabs", "history_url", "track_length",
+                  "youtube_oembed", "video_thumbnail", "media_player")}
+        self.addCleanup(lambda: [setattr(dgp, k, v) for k, v in saved.items()])
+        dgp._SILENT.clear()
+        self.windows = [("(4) Video A - YouTube - Google Chrome", False)]
+        dgp.browser_windows = lambda: [(c[:-len(" - Google Chrome")], m) for c, m in self.windows]
+        dgp.open_tabs = lambda: [Tab(("x", 1), 1, 0, False, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        dgp.history_url = lambda title, files=None: ""
+        dgp.track_length = lambda title, meta, video=None: 600 * 1_000_000
+        dgp.youtube_oembed = lambda video: {"title": "Video A", "author_name": "Canal A"}
+        dgp.video_thumbnail = lambda video: "thumb"
+        dgp.media_player = lambda service: None
+
+    def test_visible_muted_video_is_shown(self):
+        kind, item = dgp.service_now("youtube")
+        self.assertEqual((kind, item["video"]), ("mudo", "AAAAAAAAAAA"))
+        text, extra = dgp.yt_state()
+        self.assertEqual((text, extra["details"]), ("Canal A", "Video A"))
+
+    def test_minimized_loading_or_too_long(self):
+        self.windows = [("Video A - YouTube - Google Chrome", True)]
+        self.assertIsNone(dgp.silent_video("youtube"))
+        self.windows = [("YouTube - Google Chrome", False)]
+        self.assertIsNone(dgp.silent_video("youtube"))
+        self.windows = [("Video A - YouTube - Google Chrome", False)]
+        dgp.silent_video("youtube")["since"] -= 600 + dgp.SILENT_SLACK + 1
+        self.assertIsNone(dgp.silent_video("youtube"))
+
+
 class OpenProfiles(unittest.TestCase):
     """So as abas de perfis carregados no navegador contam."""
 

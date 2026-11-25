@@ -4,6 +4,14 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.4
+
+Muted YouTube videos show up again.
+
+* Chrome only publishes a media player (MPRIS) for media with sound, so a muted video vanished from the presence, and in 1.5.3 nothing was shown at all. Now a YouTube video open in a visible Chrome window counts as watched even without sound: title, channel, cover and the time since it was opened. It stops after the length of the video (plus 2 min), or when the window is minimized or shows another page.
+
+* Vídeo do YouTube mutado volta a aparecer: o Chrome não publica player de mídia sem som, então agora a janela visível com o vídeo aberto basta.
+
 ## 1.5.3
 
 YouTube detection is faster and stops crying wolf.
