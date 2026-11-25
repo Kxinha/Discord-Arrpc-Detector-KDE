@@ -88,3 +88,34 @@ class CleanLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(tray is None, f"bandeja sem GTK: {SKIP}")
+class MenuEntry(unittest.TestCase):
+    """A instalacao por script ganha uma entrada no menu; pacote nao."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, self.tmp)
+        saved = {n: getattr(tray, n) for n in ("MENU_ENTRY", "MENU_ICON", "SYSTEM_ENTRIES")}
+        self.addCleanup(lambda: [setattr(tray, k, v) for k, v in saved.items()])
+        tray.MENU_ENTRY = self.tmp / "applications/discord-presence-tray.desktop"
+        tray.MENU_ICON = self.tmp / "icons/discord-game-presence.svg"
+        tray.SYSTEM_ENTRIES = [self.tmp / "usr/discord-presence-tray.desktop"]
+        self.script = tray.HOME / ".local/bin/discord-presence-tray.py"
+
+    def test_script_install_gets_entry_and_icon(self):
+        self.assertEqual(tray.ensure_menu_entry(self.script), tray.MENU_ENTRY)
+        text = tray.MENU_ENTRY.read_text()
+        self.assertIn("Exec=systemctl --user start discord-game-presence-tray.service", text)
+        self.assertIn(f"Icon={tray.MENU_ICON}", text)
+        self.assertTrue(tray.MENU_ICON.read_text().startswith("<svg"))
+        self.assertIsNone(tray.ensure_menu_entry(self.script))  # ja esta igual
+
+    def test_package_or_clone_gets_nothing(self):
+        self.assertIsNone(tray.ensure_menu_entry("/usr/bin/discord-presence-tray"))
+        tray.SYSTEM_ENTRIES[0].parent.mkdir(parents=True)
+        tray.SYSTEM_ENTRIES[0].write_text("x")
+        self.assertIsNone(tray.ensure_menu_entry(self.script))
+        self.assertFalse(tray.MENU_ENTRY.exists())

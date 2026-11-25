@@ -4,6 +4,15 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.6
+
+The tray is in the application menu.
+
+* The script install (`curl ... | bash`, and the tray's own updates) never created a menu entry, so once the tray was closed with *Quit* there was no way to open it again without a terminal. The tray now adds **Discord Presence Tray** to the application menu the first time it runs from `~/.local/bin`. The entry starts the tray's user service, so it never opens a second copy. The `.pkg.tar.zst`, `.deb`, `.rpm` and AppImage already had their own entry and are left alone.
+* Opening the tray while it is already running no longer adds a second icon.
+
+* A bandeja aparece no menu do KDE (instalação por script), e abrir de novo não duplica o ícone.
+
 ## 1.5.5
 
 The real reason YouTube kept disappearing.

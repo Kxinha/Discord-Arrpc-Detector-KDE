@@ -1858,7 +1858,85 @@ class Tray:
         return False
 
 
+# ------------------------------------------------------------- KDE menu
+# The packages ship a .desktop file; the script install (~/.local/bin) had
+# none, so the tray never showed up in the application menu and, once closed
+# with Quit, there was no way to open it again short of a terminal. The tray
+# writes its own entry the first time it runs from a script install.
+DATA_HOME = pathlib.Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+MENU_ENTRY = DATA_HOME / "applications" / "discord-presence-tray.desktop"
+MENU_ICON = DATA_HOME / "icons/hicolor/scalable/apps" / f"{APP}.svg"
+SYSTEM_ENTRIES = [pathlib.Path(d) / "applications/discord-presence-tray.desktop"
+                  for d in (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+                  if d]
+
+
+def menu_entry_text():
+    return f"""[Desktop Entry]
+Type=Application
+Name=Discord Presence Tray
+GenericName=Rich Presence control
+Comment=Choose which apps Discord can see, and control the presence daemon
+Exec=systemctl --user start {TRAY_SERVICE}
+Icon={MENU_ICON}
+Terminal=false
+Categories=Utility;
+Keywords=discord;presence;rich presence;tray;games;
+StartupNotify=false
+"""
+
+
+def ensure_menu_entry(script=None):
+    """Menu entry for a script install; packages already have their own.
+    Returns the path written, or None when nothing had to be done."""
+    script = pathlib.Path(script or sys.argv[0]).resolve()
+    if script.parent != (HOME / ".local/bin").resolve():
+        return None  # package, AppImage or a clone: not ours to add
+    if any(path.exists() for path in SYSTEM_ENTRIES):
+        return None
+    text = menu_entry_text()
+    try:
+        if not MENU_ICON.exists():
+            MENU_ICON.parent.mkdir(parents=True, exist_ok=True)
+            MENU_ICON.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+                f'width="64" height="64">{SHAPE_SVG["blob"].format(color=COLORS[0][1])}</svg>')
+        if MENU_ENTRY.exists() and MENU_ENTRY.read_text() == text:
+            return None
+        MENU_ENTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MENU_ENTRY.with_suffix(".tmp")
+        tmp.write_text(text)
+        os.replace(tmp, MENU_ENTRY)
+    except OSError:
+        return None
+    return MENU_ENTRY
+
+
+_LOCK = []
+
+
+def already_running():
+    """True when another tray holds the lock (opened twice from the menu)."""
+    import fcntl
+    base = os.environ.get("XDG_RUNTIME_DIR") or str(CACHE)
+    path = pathlib.Path(base) / APP / "tray.lock"
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handle = open(path, "w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False  # no place for a lock: better two icons than none
+    _LOCK.append(handle)  # held until the process exits
+    return False
+
+
 def main():
+    if already_running():
+        print("the tray is already running", file=sys.stderr)
+        return
+    ensure_menu_entry()
     Tray()
     Gtk.main()
 
