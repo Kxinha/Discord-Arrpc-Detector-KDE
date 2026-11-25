@@ -4,6 +4,16 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.8
+
+Tested on every distro the README promises.
+
+* New distro matrix (`tests/distros/run.sh`): Arch, Ubuntu 24.04 and 26.04, Debian 13, Fedora and openSUSE Tumbleweed, each in a container with systemd as PID 1, a real `systemctl --user` session and a headless X server, installed both with `curl | bash` and with the native package. Each one starts a fake game that has to reach a fake Discord socket and clear when it closes, registers the tray with a StatusNotifier host (what Plasma uses), clicks its menu over D-Bus, and runs the unit tests with that distro's Python. `tests/distros/vm.sh` does the same in a real Ubuntu 24.04 VM (KVM). Results in [docs/TESTING.md](docs/TESTING.md).
+* The Arch package listed the tray icon library (`libayatana-appindicator`) and `librsvg` as optional, so a plain `pacman -U` gave a daemon with no tray. They are real dependencies now. Found by the matrix.
+* *Quit tray* sits apart from *Restart daemon*, behind a separator, and leaves a line in the journal when clicked, so a tray that closed has an explanation.
+
+* Testado em todas as distros do README (containers e VM). O pacote do Arch agora puxa a biblioteca da bandeja, e o *Quit tray* ficou separado do *Restart daemon*.
+
 ## 1.5.7
 
 Notifications with the app icon.

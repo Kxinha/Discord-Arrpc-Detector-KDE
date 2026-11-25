@@ -351,6 +351,11 @@ class StatusFile(unittest.TestCase):
                                   "discord-game-presence"])
         self.addCleanup(alive.wait)
         self.addCleanup(alive.kill)
+        # right after fork the child still has the test runner's cmdline: wait for
+        # the exec (lost this race once under load in the distro matrix)
+        deadline = time.monotonic() + 5
+        while not dgp.daemon_alive(alive.pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.path.write_text(json.dumps({"pid": alive.pid, "showing": {"a": {"client_id": "2"}}}))
         self.assertEqual(dgp.leftover_ids(everything), [])  # outro daemon rodando
         self.path.write_text("{quebrado")

@@ -148,8 +148,8 @@ depend = python
 depend = python-gobject
 depend = gtk3
 depend = iproute2
-optdepend = libayatana-appindicator: tray icon
-optdepend = librsvg: tray icon rendering
+depend = libayatana-appindicator
+depend = librsvg
 EOF
 
     cat > "$payload/.INSTALL" <<'EOF'

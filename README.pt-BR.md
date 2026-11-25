@@ -80,6 +80,8 @@ Baixe da [página de releases](https://github.com/gabrielmf1998/Discord-Arrpc-De
 | **Arch**, Manjaro, EndeavourOS, CachyOS | `.pkg.tar.zst` | `sudo pacman -U ./discord-game-presence-*-any.pkg.tar.zst` |
 | Qualquer outra | `.AppImage` | `chmod +x DiscordPresence-*.AppImage && ./DiscordPresence-*.AppImage` |
 
+Cada release é testada no Arch, Ubuntu 24.04 e 26.04, Debian 13, Fedora e openSUSE Tumbleweed, pelo script e pelo pacote, e numa VM Ubuntu de verdade. Veja a [matriz de testes](docs/TESTING.md).
+
 Depois, uma vez, sem root:
 
 ```bash

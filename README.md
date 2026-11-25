@@ -105,6 +105,8 @@ From the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector
 | **Fedora**, RHEL, Nobara | `.rpm` | `sudo dnf install ./discord-game-presence-*.noarch.rpm` |
 | Anything else | `.AppImage` | `chmod +x DiscordPresence-*.AppImage && ./DiscordPresence-*.AppImage` |
 
+Every release is tested on Arch, Ubuntu 24.04 and 26.04, Debian 13, Fedora and openSUSE Tumbleweed, with both the script and the package, plus a real Ubuntu VM. See the [test matrix](docs/TESTING.md).
+
 After a package install, once, without root:
 
 ```bash

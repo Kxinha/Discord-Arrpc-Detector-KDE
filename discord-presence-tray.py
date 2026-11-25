@@ -890,13 +890,20 @@ class Tray:
         restart.connect("activate", self.on_restart)
         menu.append(restart)
 
+        # apart from Restart daemon, so a slip of the mouse does not close the tray
+        menu.append(Gtk.SeparatorMenuItem())
         quit_item = Gtk.MenuItem(label="Quit tray")
-        quit_item.connect("activate", lambda *_: Gtk.main_quit())
+        quit_item.connect("activate", self.on_quit)
         menu.append(quit_item)
 
         menu.show_all()
         self.discord_fix.set_visible(False)
         return menu
+
+    def on_quit(self, *_):
+        # leaves a trace in the journal: "why did the tray close" has an answer
+        print("tray: Quit tray clicked in the menu", file=sys.stderr, flush=True)
+        Gtk.main_quit()
 
     # ------------------------------------------------------------ catalog
     def builtin_games(self):

@@ -4,6 +4,12 @@
    top of `CHANGELOG.md`. Its first line is what the tray's update notification
    shows.
 2. Run the tests locally (see the README, Development) and commit.
+   Then the distro matrix and the VM, which also rewrite `docs/TESTING.md`:
+
+   ```bash
+   packaging/build.sh && tests/distros/run.sh && tests/distros/vm.sh \
+       && python3 tests/distros/report.py tests/distros/out/results.tsv .
+   ```
 3. Push `main` to both remotes and wait for the CI run on GitHub to pass:
 
    ```bash
