@@ -4,6 +4,14 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.7
+
+Notifications with the app icon.
+
+* Notifications asked for the `software-update-available` icon, which Breeze does not have, so KDE showed a blank file in its place, and the header had no icon at all. Every notification now carries the app's own icon and points to its menu entry, so KDE shows the icon in the header too.
+
+* As notificações agora têm o ícone do app, no cabeçalho e ao lado do texto, em vez do arquivo em branco.
+
 ## 1.5.6
 
 The tray is in the application menu.

@@ -249,10 +249,27 @@ def reload_daemon(daemon):
     return False
 
 
+def app_icon():
+    """The app's own icon for notifications: the one the tray installs with
+    its menu entry, the one a package installs, or the themed name."""
+    for path in [MENU_ICON] + [pathlib.Path(d) / f"icons/hicolor/scalable/apps/{APP}.svg"
+                               for d in (os.environ.get("XDG_DATA_DIRS")
+                                         or "/usr/local/share:/usr/share").split(":") if d]:
+        if path.exists():
+            return str(path)
+    return APP
+
+
+def notify_command(icon=None):
+    """notify-send with the app icon (a missing theme icon showed up as a
+    blank file) and the menu entry, so KDE puts the icon in the header too."""
+    return ["notify-send", "-a", "Discord Presence", "-i", icon or app_icon(),
+            "-h", "string:desktop-entry:discord-presence-tray"]
+
+
 def notify(body, title="Discord Presence", icon=None):
     if shutil.which("notify-send"):
-        subprocess.Popen(["notify-send", "-a", "Discord Presence"]
-                         + (["-i", icon] if icon else []) + [title, body])
+        subprocess.Popen(notify_command(icon) + [title, body])
 
 
 def ask(title, body, actions, on_choice, icon=None):
@@ -265,7 +282,7 @@ def ask(title, body, actions, on_choice, icon=None):
         return
 
     def wait():
-        command = ["notify-send", "-a", "Discord Presence"] + (["-i", icon] if icon else [])
+        command = notify_command(icon)
         for name, label in actions:
             command += ["-A", f"{name}={label}"]
         try:
@@ -1414,8 +1431,7 @@ class Tray:
             if new and old and new > old:
                 ask(f"Discord Presence updated to {version}", f"You were on {before}.",
                     [("notes", "What's new")],
-                    lambda _choice: open_path(self.release_page()),
-                    icon="software-update-available")
+                    lambda _choice: open_path(self.release_page()))
         return False
 
     def first_update_check(self):
@@ -1477,7 +1493,7 @@ class Tray:
         if kind != "manual":
             actions.insert(0, ("update", "Update now"))
         ask(f"Discord Presence {newer['version']} is out", body, actions,
-            self.on_update_choice, icon="software-update-available")
+            self.on_update_choice)
         return False
 
     def on_update_choice(self, choice):

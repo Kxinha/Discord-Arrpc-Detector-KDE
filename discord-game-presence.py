@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.5.6"
+VERSION = "1.5.7"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 

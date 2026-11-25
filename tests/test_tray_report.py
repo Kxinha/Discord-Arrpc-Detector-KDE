@@ -119,3 +119,10 @@ class MenuEntry(unittest.TestCase):
         tray.SYSTEM_ENTRIES[0].write_text("x")
         self.assertIsNone(tray.ensure_menu_entry(self.script))
         self.assertFalse(tray.MENU_ENTRY.exists())
+
+    def test_notifications_carry_the_app_icon(self):
+        tray.ensure_menu_entry(self.script)
+        command = tray.notify_command()
+        self.assertEqual(command[command.index("-i") + 1], str(tray.MENU_ICON))
+        self.assertIn("string:desktop-entry:discord-presence-tray", command)
+        self.assertEqual(tray.notify_command("dialog-error")[4], "dialog-error")
