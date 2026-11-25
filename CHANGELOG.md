@@ -4,6 +4,17 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.3
+
+YouTube detection is faster and stops crying wolf.
+
+* **Real time.** YouTube and YouTube Music are read every 2 s instead of 5 s, so a new video shows up in about 2 s. Updates are still spaced at least 4 s apart, under Discord's limit of 5 per 20 s.
+* **No more "On channel <video title>".** The daemon read the saved session of Chrome profiles that were not even open, and mixed an old channel tab from them with the title of the window you are looking at. Now only profiles the browser has loaded count.
+* **Far fewer false "Ad".** A title that does not match the tab is no longer called an ad when it is a real video: one Chrome knows from history (another tab, the next video, a thumbnail preview) or the one the window itself shows. The window title from KWin also identifies YouTube on its own while Chrome has not saved the session yet.
+* **YouTube Premium.** New tray option *Presence details > YouTube > I have YouTube Premium* (config `"premium": true`): nothing is ever shown as an ad.
+
+* Detecção do YouTube em tempo real (2 s), sem "No canal <título do vídeo>" vindo de perfil do Chrome fechado, bem menos "Anúncio" falso, e opção YouTube Premium na bandeja.
+
 ## 1.5.2
 
 The AUR recipe is gone: the project is distributed only through the releases on GitHub and GitLab (script installer, `.pkg.tar.zst`, `.deb`, `.rpm`, AppImage). Nothing changes for an existing install.

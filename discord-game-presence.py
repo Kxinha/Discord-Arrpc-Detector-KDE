@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -435,6 +435,7 @@ def match_detectable(paths, args, db, owners=None):
 # ------------------------------------------------------------- MPRIS
 MPRIS_PREFIX = "org.mpris.MediaPlayer2."
 MPRIS_TTL = 1
+MEDIA_POLL = 2     # YouTube e YT Music: o estado e barato de ler (MPRIS + KWin)
 _BUS = {"stamp": -1e9, "players": []}
 _PROPS = {}
 _BUS_LOCK = threading.Lock()
@@ -1005,10 +1006,58 @@ def session_tabs(profile):
     return tabs
 
 
+_OPEN_PROFILES = {"stamp": -1e9, "dirs": None}
+OPEN_PROFILES_TTL = 5
+
+
+def open_profiles():
+    """Perfis carregados agora em algum navegador Chromium, ou None quando nao
+    da para saber.
+
+    O arquivo de sessao de um perfil fechado continua no disco com as abas da
+    ultima vez, e uma delas marcada como selecionada. Lido como se estivesse
+    aberto, ele misturava uma pagina de horas atras com o titulo da janela de
+    agora ("No canal <video que esta tocando>"). Um perfil carregado mantem o
+    proprio History aberto no processo do navegador, entao basta olhar os
+    descritores dele.
+    """
+    with _SESSIONS_LOCK:
+        if time.monotonic() - _OPEN_PROFILES["stamp"] < OPEN_PROFILES_TTL:
+            return _OPEN_PROFILES["dirs"]
+    found, looked = set(), False
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm") as f:
+                if f.read().strip() not in CHROMIUM_PROCESSES:
+                    continue
+            fds = os.listdir(f"/proc/{entry}/fd")
+        except OSError:
+            continue
+        looked = True
+        for fd in fds:
+            try:
+                target = os.readlink(f"/proc/{entry}/fd/{fd}")
+            except OSError:
+                continue
+            if target.endswith("/History"):
+                found.add(target[:-len("/History")])
+    dirs = found if looked and found else None
+    with _SESSIONS_LOCK:
+        _OPEN_PROFILES.update(stamp=time.monotonic(), dirs=dirs)
+    return dirs
+
+
 def open_tabs():
-    """Todas as abas abertas em todos os perfis de navegadores Chromium."""
+    """Todas as abas abertas nos perfis carregados de navegadores Chromium."""
+    profiles, loaded = chromium_profiles(), open_profiles()
+    # caminho que nao bate com nenhum perfil conhecido (sandbox que mostra
+    # outro caminho, por exemplo): sem como saber, vale como antes, todos
+    if loaded is not None and any(str(p) in loaded for p in profiles):
+        profiles = [p for p in profiles if str(p) in loaded]
     tabs = []
-    for profile in chromium_profiles():
+    for profile in profiles:
         tabs += session_tabs(profile)
     return tabs
 
@@ -1209,6 +1258,14 @@ def resolve_player(name, process, props, tabs, windows=None):
         if url:
             media.update(url=url, service=media_service(url), source="historico",
                          video=youtube_video_id(url))
+            return media
+        # nem aba nem historico ainda (o Chrome grava a sessao uns segundos
+        # depois): a janela do KWin, que esta sempre em dia, ja diz se a aba
+        # ativa e o YouTube com esse mesmo titulo
+        windows = browser_windows() if windows is None else windows
+        service = caption_playing(title, windows)
+        if service:
+            media.update(service=service, source="janela")
         return media
 
     service = media_service(owner.url)
@@ -1228,11 +1285,48 @@ def resolve_player(name, process, props, tabs, windows=None):
             _TRACK_TAB[track] = (owner.key, owner.url, title)
         _MISMATCH.pop(name, None)
         media["source"] = how
-    elif _mismatch_age(name, title) < AD_CONFIRM:
+        return media
+    # Titulo diferente do video da aba. Antes de chamar de anuncio, o que
+    # quase sempre e: outra aba tocando (o Chrome alterna o player entre
+    # elas), a previa de uma miniatura, ou o video seguinte que a sessao
+    # ainda nao gravou. Um titulo que o historico conhece como video do
+    # YouTube, ou que a janela mostra como a pagina aberta, e video de verdade:
+    # durante um anuncio a janela continua com o titulo do video.
+    url = history_url(title)
+    if url and youtube_video_id(url) and youtube_video_id(url) != video:
+        _MISMATCH.pop(name, None)
+        media.update(url=url, service=media_service(url), tab=None,
+                     video=youtube_video_id(url), source="historico")
+        return media
+    windows = browser_windows() if windows is None else windows
+    if caption_playing(title, windows):
+        _MISMATCH.pop(name, None)
+        media.update(url="", tab=None, video=None, source="janela")
+        return media
+    if _mismatch_age(name, title) < AD_CONFIRM:
         media.update(pending=True, source="aguardando a aba")
+    elif has_premium():
+        # sem anuncios na conta: e o que esta tocando, so sem link
+        media.update(url="", tab=None, video=None, source="titulo (Premium)")
     else:
         media.update(ad=True, source="anuncio")
     return media
+
+
+def caption_playing(title, windows):
+    """Servico da janela cuja aba ativa mostra exatamente o titulo tocado."""
+    if not title:
+        return None
+    for caption, _minimized in windows or []:
+        service = caption_service(caption)
+        if service and page_title(caption) == title:
+            return service
+    return None
+
+
+def has_premium():
+    """O usuario marcou que tem YouTube Premium (vale para o YT Music tambem)."""
+    return media_option("youtube", "premium") or media_option("ytm", "premium")
 
 
 def media_now():
@@ -1434,6 +1528,7 @@ MEDIA_DEFAULTS = {
     "show_browsing": True,             # pagina inicial, canal, busca, sem tocar nada
     "browse_minutes": BROWSE_IDLE / 60,  # mesma pagina parada por mais que isso some
     "show_search": False,              # o termo pesquisado
+    "premium": False,                  # True: a conta nao tem anuncios
 }
 
 
@@ -2914,7 +3009,7 @@ GAMES = {
     # Toca no navegador, entao a presenca segue o MPRIS e as abas abertas, nao
     # um processo proprio. Precisa de um app em discord.com/developers.
     "youtube-music": {
-        "poll": 5,  # a posicao so aparece em janelas curtas
+        "poll": MEDIA_POLL,  # troca de video aparece em ~2 s
         "grace": 10,  # troca de faixa derruba o player por um instante
         "client_id": "1537975657735262368",
         "details": "YouTube Music",  # o state troca pela musica
@@ -2929,7 +3024,7 @@ GAMES = {
     # Videos do YouTube em qualquer navegador. Precisa de um app proprio:
     # "YouTube" nao existe na base detectavel do Discord.
     "youtube": {
-        "poll": 5,  # a posicao so aparece em janelas curtas
+        "poll": MEDIA_POLL,  # troca de video aparece em ~2 s
         "grace": 10,  # o autoplay derruba o player por um instante
         "client_id": "1538427046760423474",
         "details": "YouTube",  # o state troca pelo titulo do video
@@ -3043,6 +3138,10 @@ GAMES = {
 }
 
 POLL = 15          # atualizacao da presenca de um app aberto
+# O Discord aceita 5 SET_ACTIVITY a cada 20 s por conexao. Ler o estado a cada
+# 2 s e publicar so quando ele muda fica bem abaixo disso, mas uma rajada de
+# mudancas (pular varios videos) espera esse intervalo entre uma e outra.
+PUBLISH_GAP = 4
 DETECT_POLL = 5    # procura de apps que ainda nao estao abertos
 ALIVE_CHECK = 2    # um app aberto continua aberto?
 IPC_TIMEOUT = 15
@@ -3077,7 +3176,7 @@ CONFIG = config_home() / "discord-game-presence.json"
 # app por 10 s ou mais.
 OPTION_KEYS = ("detail", "show_thumbnail", "show_links", "show_buttons", "show_time",
                "show_paused", "pause_minutes", "show_ads", "show_browsing",
-               "browse_minutes", "show_search", "status_display")
+               "browse_minutes", "show_search", "premium", "status_display")
 _BUILTIN_OPTIONS = {}
 RELOADS = [0]  # cada releitura soma 1: as sessoes republicam na hora
 
@@ -3556,7 +3655,10 @@ def session(key, game):
                 now = time.monotonic()
                 changed = not same_activity(published, activity)
                 due = published is not None and now - sent[0] >= REASSERT
-                if (changed or due) and (activity != refused or now >= retry_at):
+                early = published is not None and now - sent[0] < PUBLISH_GAP
+                if early and changed:
+                    next_state = min(next_state, sent[0] + PUBLISH_GAP)
+                elif (changed or due) and (activity != refused or now >= retry_at):
                     try:
                         publish(legacy_activity(activity) if legacy else activity,
                                 again=not changed)

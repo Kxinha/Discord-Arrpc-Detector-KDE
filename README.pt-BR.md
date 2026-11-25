@@ -251,6 +251,7 @@ Cada entrada tem um nível, e os `show_*` trocam um item só. Pela bandeja em
 | `show_paused` | `true` | mídia pausada continua no perfil; `false` tira na hora |
 | `pause_minutes` | `5` | por quanto tempo a mídia pausada continua no perfil |
 | `show_ads` | `true` | `false` não mostra "Anúncio": fica o vídeo ou a música que vem depois |
+| `premium` | `false` | `true` quando a conta tem YouTube Premium: nada vira "Anúncio" |
 | `show_browsing` | `true` | `false` só mostra quando algo está tocando, nunca a página inicial ou um canal |
 | `browse_minutes` | `15` | a mesma página parada por mais que isso sai do perfil |
 | `show_search` | `false` | mostra o termo pesquisado ("Pesquisando blender") |

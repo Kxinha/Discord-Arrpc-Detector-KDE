@@ -568,6 +568,63 @@ class ChromePlayer(unittest.TestCase):
         self.assertFalse(fits("Black Friday", "Loja", "SSSSSSSSSSS", "ytm"))
         self.assertIsNone(fits("x", "y", "ZZZZZZZZZZZ", "ytm"))
 
+    def test_other_video_from_history_is_not_an_ad(self):
+        tabs = [Tab(("x", 1), 1, 0, True, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        self.play("Video A", "Canal A", tabs)
+        # outra aba (ou o video seguinte) tocando: o historico conhece o titulo
+        dgp.history_url = lambda title, files=None: (
+            WATCH + "BBBBBBBBBBB" if title == "Video B" else "")
+        media = self.play("Video B", "Canal B", tabs)
+        self.assertEqual((media["video"], media["ad"], media["pending"]),
+                         ("BBBBBBBBBBB", False, False))
+
+    def test_title_shown_by_the_window_is_not_an_ad(self):
+        tabs = [Tab(("x", 1), 1, 0, True, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        self.play("Video A", "Canal A", tabs)
+        windows = [("(2) Video C - YouTube", False)]  # a sessao ainda nao gravou
+        media = self.play("Video C", "Canal C", tabs, windows=windows)
+        self.assertEqual((media["service"], media["ad"], media["pending"], media["video"]),
+                         ("youtube", False, False, None))
+
+    def test_window_alone_identifies_youtube(self):
+        media = self.play("Video C", "Canal C", [], windows=[("Video C - YouTube", False)])
+        self.assertEqual((media["service"], media["source"]), ("youtube", "janela"))
+
+    def test_premium_never_shows_ads(self):
+        game = dgp.GAMES["youtube"]
+        saved = game.get("premium")
+        self.addCleanup(lambda: game.pop("premium") if saved is None
+                        else game.update(premium=saved))
+        game["premium"] = True
+        tabs = [Tab(("x", 1), 1, 0, True, WATCH + "AAAAAAAAAAA", "Video A - YouTube")]
+        self.play("Video A", "Canal A", tabs)
+        self.assertTrue(self.play("Outra coisa", "Alguem", tabs)["pending"])
+        self.age(dgp.AD_CONFIRM + 1)
+        media = self.play("Outra coisa", "Alguem", tabs)
+        self.assertEqual((media["service"], media["ad"], media["video"]),
+                         ("youtube", False, None))
+
+
+class OpenProfiles(unittest.TestCase):
+    """So as abas de perfis carregados no navegador contam."""
+
+    def setUp(self):
+        saved = {name: getattr(dgp, name) for name in
+                 ("chromium_profiles", "open_profiles", "session_tabs")}
+        self.addCleanup(lambda: [setattr(dgp, k, v) for k, v in saved.items()])
+        dgp.chromium_profiles = lambda: [dgp.pathlib.Path("/c/Default"),
+                                         dgp.pathlib.Path("/c/Profile 1")]
+        dgp.session_tabs = lambda profile: [str(profile)]
+
+    def test_closed_profile_is_skipped(self):
+        dgp.open_profiles = lambda: {"/c/Profile 1"}
+        self.assertEqual(dgp.open_tabs(), ["/c/Profile 1"])
+
+    def test_unknown_falls_back_to_all(self):
+        for loaded in (None, {"/outro/caminho/Default"}):
+            dgp.open_profiles = lambda loaded=loaded: loaded
+            self.assertEqual(dgp.open_tabs(), ["/c/Default", "/c/Profile 1"])
+
 
 class ChromePresence(unittest.TestCase):
     def setUp(self):

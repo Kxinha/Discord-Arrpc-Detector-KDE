@@ -59,7 +59,8 @@ SHOW_CHOICES = [("Cover image", "thumbnail"), ("Links in the text", "links"),
 # True: YouTube in a browser, "site": the other browser sites, False: a player app
 MEDIA_KEYS = {"youtube": True, "youtube-music": True, "stremio": False,
               "twitch": "site", "netflix": "site", "crunchyroll": "site", "spotify": "site"}
-MEDIA_CHOICES = [("Show ads as \u201cAd\u201d", "show_ads"),
+MEDIA_CHOICES = [("I have YouTube Premium (never \u201cAd\u201d)", "premium"),
+                 ("Show ads as \u201cAd\u201d", "show_ads"),
                  ("Show browsing (home, channel, search)", "show_browsing"),
                  ("Show what I search", "show_search")]
 PAUSE_MINUTES = [1, 5, 15, 30, 60]

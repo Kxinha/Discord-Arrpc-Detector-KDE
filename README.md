@@ -244,6 +244,7 @@ The tray window covers the common case. Everything lives in
 | `detail` | `"full"`, `"basic"` (nothing clickable) or `"minimal"` (only the app and time) |
 | `show_thumbnail`, `show_links`, `show_buttons`, `show_time` | override one item of the level |
 | `show_paused`, `pause_minutes`, `show_ads`, `show_browsing`, `browse_minutes`, `show_search` | media options |
+| `premium` | YouTube and YouTube Music: `true` when your account has YouTube Premium, so nothing is ever shown as an ad |
 
 `grep mygame.exe`, an editor with the file open, `tail -f` on a log and Proton
 wrappers do not count as the game being open. Play time counts from when the
