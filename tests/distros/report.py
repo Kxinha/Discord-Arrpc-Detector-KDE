@@ -76,15 +76,16 @@ for d in distros:
                    f'<span>{ok}/{len(states)}</span><small>python {python.get(d, "?")}</small></div>')
 page = f"""<!doctype html><meta charset="utf-8"><title>Discord Presence {VERSION} distro matrix</title>
 <style>
-body{{font-family:system-ui,sans-serif;margin:24px;color:var(--ag-text,#ddd);background:transparent}}
+html{{color-scheme:dark;background:#14161a}}
+body{{font-family:system-ui,sans-serif;margin:24px;color:var(--ag-text,#e3e6eb);background:#14161a}}
 h1{{font-size:20px;margin:0 0 4px}} p{{color:var(--ag-muted,#999);margin:0 0 16px}}
 .cards{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px}}
-.card{{background:var(--ag-surface,#222);border:1px solid var(--ag-border,#333);border-radius:var(--ag-radius,10px);
+.card{{background:var(--ag-surface,#1d2026);border:1px solid var(--ag-border,#343943);border-radius:var(--ag-radius,10px);
 padding:10px 14px;min-width:120px;display:flex;flex-direction:column}}
 .card span{{font-size:22px;font-weight:700}} .card.good span{{color:var(--ag-ok,#4c4)}} .card.bad span{{color:var(--ag-err,#e55)}}
 .card small{{color:var(--ag-muted,#999)}}
-table{{border-collapse:collapse;font-size:13px}} th,td{{border:1px solid var(--ag-border,#333);padding:5px 8px}}
-th{{background:var(--ag-surface-2,#2a2a2a);font-weight:600}} td:first-child{{text-align:left}}
+table{{border-collapse:collapse;font-size:13px}} th,td{{border:1px solid var(--ag-border,#343943);padding:5px 8px}}
+th{{background:var(--ag-surface-2,#262a31);font-weight:600}} td:first-child{{text-align:left}}
 td{{text-align:center}} td.ok{{color:var(--ag-ok,#4c4)}} td.fail{{color:var(--ag-err,#e55);font-weight:700}} td.na{{color:var(--ag-muted,#777)}}
 </style>
 <h1>Discord Presence {VERSION}, {total['ok']} of {total['ok'] + total['fail']} checks passed</h1>
