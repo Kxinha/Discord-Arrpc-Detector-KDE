@@ -87,9 +87,6 @@ systemctl --user enable --now discord-game-presence.service
 systemctl --user enable --now discord-game-presence-tray.service
 ```
 
-Arch também pode construir do jeito idiomático com a receita do AUR em
-[`packaging/aur/`](packaging/aur/PKGBUILD) (`makepkg -si`).
-
 O `.AppImage` carrega o código do projeto mas usa o **Python e o GTK do
 sistema** — empacotar GTK inteiro passaria de 100 MB e ainda quebraria a
 integração com o tema de ícones do desktop, que é justamente o que a bandeja
@@ -697,7 +694,6 @@ tests/test_sites_cs2.py                    Twitch, Netflix, Crunchyroll, Spotify
 tests/test_tray_report.py                  estado do Discord e o relatório sem dados pessoais
 tests/e2e_install.sh                       o instalador via curl | bash contra uma release local
 .github/workflows/ci.yml                   testes a cada push; pacotes e release a cada tag
-packaging/aur/                             PKGBUILD e .SRCINFO do AUR
 systemd/*.service                          units para instalação por usuário
 packaging/build.sh                         gera .rpm, .deb, .pkg.tar.zst e .AppImage
 packaging/rpm|arch|appimage|files/         spec, PKGBUILD, AppRun e units de /usr
@@ -746,7 +742,7 @@ de instalação.
 Desde a 1.5.0 a release não depende de nenhum PC: o GitHub Actions roda os
 testes a cada push, e uma tag `vX.Y.Z` (igual ao `VERSION` do daemon) constrói
 todos os pacotes, confere e publica a release com todo o `dist/`. O passo a
-passo, com o GitLab e o AUR, está em [`docs/RELEASING.md`](docs/RELEASING.md).
+passo, com o GitLab, está em [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Licença
 

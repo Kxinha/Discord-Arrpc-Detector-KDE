@@ -4,6 +4,12 @@ Release notes for each version. GitHub Actions publishes the section of a
 version as the notes of its release (see docs/RELEASING.md). Older versions
 are described on the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/releases).
 
+## 1.5.2
+
+The AUR recipe is gone: the project is distributed only through the releases on GitHub and GitLab (script installer, `.pkg.tar.zst`, `.deb`, `.rpm`, AppImage). Nothing changes for an existing install.
+
+* A receita do AUR foi removida: o projeto sai só pelas releases do GitHub e do GitLab.
+
 ## 1.5.1
 
 Counter-Strike 2: the Game State Integration file is now written when the daemon starts, so map and score show up the first time you open CS2 (1.5.0 only wrote it with the game already open, which meant opening CS2 twice).
@@ -29,7 +35,6 @@ Already on 1.4.x? The tray offers the update.
 * **Report a problem**: opens a GitHub issue already filled with version, distro, desktop, Discord client and the last log lines, or copies the same report. Titles, links, quoted text and your home path are removed first, and nothing is sent until you press Create.
 * README in English (Portuguese kept in README.pt-BR.md), MIT LICENSE file, issue templates.
 * GitHub Actions: tests, the daemon against a fake Discord, the installer and every package on each push; a tag publishes the release. Releases no longer depend on one PC.
-* AUR recipe in `packaging/aur/` as `discord-arrpc-detector-kde`. An AUR install is updated by your AUR helper; the tray only tells you about new versions.
 
 ### Em português
 

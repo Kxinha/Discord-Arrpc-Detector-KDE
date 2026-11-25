@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 PRISM = pathlib.Path.home() / ".local/share/PrismLauncher/instances"
 
@@ -3896,7 +3896,6 @@ PACKAGE_ASSETS = {
     "appimage": r"DiscordPresence-{v}-x86_64\.AppImage",
 }
 SELF_UPDATING = ("script", "appimage")
-AUR_NAME = "discord-arrpc-detector-kde"  # instalam sem pedir senha
 DAEMON_SERVICE = "discord-game-presence.service"
 TRAY_SERVICE = "discord-game-presence-tray.service"
 
@@ -3969,10 +3968,6 @@ def install_kind(path=None):
             except (OSError, subprocess.TimeoutExpired):
                 continue
             if done.returncode == 0:
-                # o pacote do AUR tem outro nome e quem atualiza e o helper
-                # do AUR; o .pkg.tar.zst da release brigaria com ele
-                if kind == "pacman" and done.stdout.decode(errors="replace").strip() == AUR_NAME:
-                    return "aur"
                 return kind
     return "manual"
 
@@ -3985,9 +3980,6 @@ def update_files(release, kind):
         if missing:
             raise UpdateError("the release has no " + " or ".join(missing))
         return {name: assets[name] for name in SCRIPT_FILES if name in assets}
-    if kind == "aur":
-        raise UpdateError("installed from the AUR: update it with your AUR helper "
-                          "(yay -Syu, paru -Syu)")
     pattern = PACKAGE_ASSETS.get(kind)
     if not pattern:
         raise UpdateError("this copy was not installed by the installer or a package; "

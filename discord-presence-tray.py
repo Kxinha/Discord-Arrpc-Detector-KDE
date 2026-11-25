@@ -65,7 +65,7 @@ MEDIA_CHOICES = [("Show ads as \u201cAd\u201d", "show_ads"),
 PAUSE_MINUTES = [1, 5, 15, 30, 60]
 KIND_LABELS = {"script": "installer script", "pacman": "pacman package",
                "deb": ".deb package", "rpm": ".rpm package", "appimage": "AppImage",
-               "manual": "manual copy", "aur": "AUR package"}
+               "manual": "manual copy"}
 
 COLORS = [
     # Discord's own palette
@@ -1471,11 +1471,9 @@ class Tray:
 
         body = release_summary(newer["notes"]) or newer["name"]
         actions = [("notes", "What's new")]
-        if kind == "aur":
-            body += "\nInstalled from the AUR: update it with your AUR helper (yay, paru)."
-        elif kind == "manual":
+        if kind == "manual":
             body += "\nThis copy is not managed by the installer: get it from the release page."
-        if kind not in ("manual", "aur"):
+        if kind != "manual":
             actions.insert(0, ("update", "Update now"))
         ask(f"Discord Presence {newer['version']} is out", body, actions,
             self.on_update_choice, icon="software-update-available")
@@ -1492,7 +1490,7 @@ class Tray:
         release = self.release
         if not release or self.update_busy:
             return
-        if (self.kind or "manual") in ("manual", "aur"):
+        if (self.kind or "manual") == "manual":
             open_path(release["page"])
             return
         self.update_busy = "installing"

@@ -28,13 +28,6 @@
         '/^## / { if (f) exit; if ($2 == v) { f = 1; next } } f' CHANGELOG.md)
    ```
 
-6. AUR (`packaging/aur/`): set `pkgver`, reset `pkgrel=1`, put the sha256 of
-   `https://github.com/gabrielmf1998/Discord-Arrpc-Detector-KDE/archive/refs/tags/vX.Y.Z.tar.gz`
-   in `sha256sums`, run `makepkg --printsrcinfo > .SRCINFO`, build once with
-   `makepkg -f`, then copy `PKGBUILD` and `.SRCINFO` to the AUR git clone
-   (`ssh://aur@aur.archlinux.org/discord-arrpc-detector-kde.git`), commit and
-   push.
-
-7. Check the public URLs: `install.sh` from both mirrors, the
+6. Check the public URLs: `install.sh` from both mirrors, the
    `releases/latest/download/SHA256SUMS` link, and the tray's update check
    (`discord-game-presence --check-update`).

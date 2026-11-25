@@ -105,9 +105,6 @@ From the [releases page](https://github.com/gabrielmf1998/Discord-Arrpc-Detector
 | **Fedora**, RHEL, Nobara | `.rpm` | `sudo dnf install ./discord-game-presence-*.noarch.rpm` |
 | Anything else | `.AppImage` | `chmod +x DiscordPresence-*.AppImage && ./DiscordPresence-*.AppImage` |
 
-Arch users can also build from the AUR recipe in
-[`packaging/aur/`](packaging/aur/PKGBUILD) (`makepkg -si`).
-
 After a package install, once, without root:
 
 ```bash
